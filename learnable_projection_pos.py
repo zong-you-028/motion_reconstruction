@@ -220,7 +220,7 @@ class LearnableProjectionPOS:
     """
     可學習投影矩陣的 POS 演算法
     """
-    def __init__(self, window_length=128, fs=84):
+    def __init__(self, window_length=128, fs=30):
         self.window_length = window_length
         self.fs = fs
     
@@ -362,7 +362,7 @@ class ProjectionMatrixLoss(nn.Module):
     - L_Freq: 頻域損失 (頻譜幅度 MSE) - 生理約束  
     - L_Ortho: 正交約束 (幾何結構) - 維持 POS 物理本質
     """
-    def __init__(self, lambda_time=1.0, lambda_freq=0.5, lambda_ortho=0.05, fs=84):
+    def __init__(self, lambda_time=1.0, lambda_freq=0.5, lambda_ortho=0.05, fs=30):
         super(ProjectionMatrixLoss, self).__init__()
         self.lambda_time = lambda_time      # 時域權重 (主導，設為 1.0)
         self.lambda_freq = lambda_freq      # 頻域權重 (0.3~0.7)
@@ -577,7 +577,7 @@ if __name__ == "__main__":
     print(f"   輸出形狀: {P_pred3.shape}")
     
     print("\n4. 測試處理器")
-    pos = LearnableProjectionPOS(window_length=128, fs=84)
+    pos = LearnableProjectionPOS(window_length=128, fs=30)
     
     # 生成測試數據
     n_samples = 500

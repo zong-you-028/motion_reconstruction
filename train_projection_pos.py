@@ -41,7 +41,7 @@ class RPPGDatasetForProjection(Dataset):
         self.mode = mode
         self.samples = []
         
-        pos_processor = LearnableProjectionPOS(window_length=window_length, fs=84)
+        pos_processor = LearnableProjectionPOS(window_length=window_length, fs=30)
         
         for rgb, ppg in zip(rgb_traces, ppg_signals):
             r_trace, g_trace, b_trace = rgb
@@ -181,7 +181,7 @@ def train_projection_model(model, train_loader, val_loader, num_epochs=50,
         lambda_time=1.0,      # 時域損失（主導）
         lambda_freq=0.5,      # 頻域損失（生理約束）
         lambda_ortho=0.05,    # 正交約束（輕微，維持結構）
-        fs=84                 # 採樣率
+        fs=30                 # 採樣率
     )
     
     # 標準 POS 矩陣（保留以備參考，但新損失函數不需要）
@@ -333,7 +333,7 @@ if __name__ == "__main__":
     
     for i in range(20):
         r, g, b, ppg, _ = generate_synthetic_rppg_data(
-            duration=30, fs=84, hr=np.random.uniform(60, 100),
+            duration=30, fs=30, hr=np.random.uniform(60, 100),
             motion_strength=np.random.uniform(0.2, 0.6)
         )
         rgb_traces.append((r, g, b))

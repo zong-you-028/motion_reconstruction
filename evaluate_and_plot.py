@@ -1,5 +1,6 @@
 """
-訓練後評估：生成結果圖表
+evaluate_and_plot.py
+評估模型與繪製圖表的專用模組
 """
 
 import torch
@@ -9,29 +10,17 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy.stats import pearsonr
 from scipy import signal
-import sys
 
-from learnable_projection_pos import (
-    ConstrainedProjectionPredictor,
-    LearnableProjectionPOS
-)
-from data_loader import DataLoader
+from learnable_projection_pos import LearnableProjectionPOS
 
-# 設定中文字體（避免方塊）
-plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'Arial']
+# 設定中文字體（避免方塊），優先使用微軟正黑體
+plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'Arial', 'SimHei']
 plt.rcParams['axes.unicode_minus'] = False
 
 
 def calculate_hr_from_rppg(rppg_signal, fs):
     """
     從 rPPG 訊號計算心率
-    
-    Args:
-        rppg_signal: rPPG 訊號
-        fs: 採樣率
-    
-    Returns:
-        heart_rate: 心率 (bpm)
     """
     # FFT
     n = len(rppg_signal)
@@ -60,12 +49,9 @@ def calculate_hr_from_rppg(rppg_signal, fs):
     return hr_bpm
 
 
-def evaluate_single_subject(model, rgb_traces, ppg_gt, subject_id, fs=84, device='cpu'):
+def evaluate_single_subject(model, rgb_traces, ppg_gt, subject_id, fs=30, device='cpu'):
     """
     評估單個受試者
-    
-    Returns:
-        dict: 包含所有評估指標和訊號
     """
     r, g, b = rgb_traces
     
@@ -175,7 +161,9 @@ def plot_single_subject_results(results, save_path):
     
     # 只顯示前 10 秒（更清楚）
     display_duration = 10  # 秒
-    display_samples = int(display_duration * 84)
+    display_samples = int(display_duration * 30)
+    if display_samples > len(t):
+        display_samples = len(t)
     
     ax1.plot(t[:display_samples], signals['ppg_gt'][:display_samples], 
              'k-', linewidth=2, label='Ground Truth PPG', alpha=0.7)
@@ -203,11 +191,11 @@ def plot_single_subject_results(results, save_path):
         fft_vals = np.abs(fft_vals[pos_mask])
         
         ax2.plot(fft_freq * 60, fft_vals, linestyle, linewidth=2, 
-                label=label, color=color, alpha=0.7)
+                 label=label, color=color, alpha=0.7)
     
-    plot_spectrum(signals['ppg_gt'], 84, 'Ground Truth', 'black', '-')
-    plot_spectrum(signals['rppg_standard'], 84, 'Standard POS', 'blue', '--')
-    plot_spectrum(signals['rppg_learned'], 84, 'Learned Projection', 'red', '-')
+    plot_spectrum(signals['ppg_gt'], 30, 'Ground Truth', 'black', '-')
+    plot_spectrum(signals['rppg_standard'], 30, 'Standard POS', 'blue', '--')
+    plot_spectrum(signals['rppg_learned'], 30, 'Learned Projection', 'red', '-')
     
     ax2.set_xlabel('Heart Rate (bpm)', fontsize=12)
     ax2.set_ylabel('Magnitude', fontsize=12)
@@ -242,7 +230,7 @@ def plot_single_subject_results(results, save_path):
         for bar in bars:
             height = bar.get_height()
             ax3.text(bar.get_x() + bar.get_width()/2., height,
-                    f'{height:.2f}', ha='center', va='bottom', fontsize=8)
+                     f'{height:.2f}', ha='center', va='bottom', fontsize=8)
     
     # 4. 心率對比
     ax4 = fig.add_subplot(gs[2, 0])
@@ -268,7 +256,7 @@ def plot_single_subject_results(results, save_path):
             if i == 0 and j == 0:  # 只在第一個子圖顯示
                 ax.plot(P_history[:, i, j], 'g-', linewidth=2, label='Learned', alpha=0.8)
                 ax.axhline(P_standard[i, j], color='r', linestyle='--', 
-                          linewidth=2, label='Standard', alpha=0.8)
+                           linewidth=2, label='Standard', alpha=0.8)
                 ax.legend(fontsize=8, loc='upper right')
             else:
                 ax.plot(P_history[:, i, j], 'g-', linewidth=2, alpha=0.8)
@@ -291,16 +279,15 @@ def plot_single_subject_results(results, save_path):
     ax5.axis('off')
     
     summary_text = f"""
-    ═══════════════════════════════════════════════════════════════════════════════════════
     Subject: {subject_id}
-    ───────────────────────────────────────────────────────────────────────────────────────
-                                Standard POS          Learned Projection          Improvement
-    ───────────────────────────────────────────────────────────────────────────────────────
+    ──────────────────────────────────────────────────────────────────────────
+                            Standard POS          Learned Projection          Improvement
+    ──────────────────────────────────────────────────────────────────────────
     Correlation              {metrics['corr_std']:8.4f}              {metrics['corr_learn']:8.4f}              {(metrics['corr_learn'] - metrics['corr_std'])*100:+7.2f}%
     SNR (dB)                 {metrics['snr_std']:8.2f}              {metrics['snr_learn']:8.2f}              {(metrics['snr_learn'] - metrics['snr_std']):+7.2f} dB
     Heart Rate (bpm)         {metrics['hr_std']:8.1f}              {metrics['hr_learn']:8.1f}              GT: {metrics['hr_gt']:.1f}
     HR Error (bpm)           {metrics['hr_error_std']:8.2f}              {metrics['hr_error_learn']:8.2f}              {(metrics['hr_error_std'] - metrics['hr_error_learn']):+7.2f}
-    ═══════════════════════════════════════════════════════════════════════════════════════
+    ──────────────────────────────────────────────────────────────────────────
     """
     
     ax5.text(0.5, 0.5, summary_text, ha='center', va='center', 
@@ -432,135 +419,3 @@ def plot_overall_summary(all_results, save_path):
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f"\n  ✓ 總結圖已保存: {save_path}")
     plt.close()
-
-
-def main():
-    """主函數"""
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='評估訓練好的模型')
-    parser.add_argument('--model', type=str, required=True, help='模型路徑 (.pth)')
-    parser.add_argument('--data', type=str, required=True, help='數據目錄')
-    parser.add_argument('--output', type=str, default='./evaluation_results', help='輸出目錄')
-    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
-    
-    args = parser.parse_args()
-    
-    print("="*60)
-    print("模型評估與可視化")
-    print("="*60)
-    print(f"\n模型: {args.model}")
-    print(f"數據: {args.data}")
-    print(f"輸出: {args.output}")
-    print(f"設備: {args.device}")
-    
-    # 創建輸出目錄
-    output_dir = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # 載入模型
-    print("\n正在載入模型...")
-    checkpoint = torch.load(args.model, map_location=args.device, weights_only=False)
-    
-    model = ConstrainedProjectionPredictor(input_dim=10, hidden_dim=64, use_residual=True)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.to(args.device)
-    model.eval()
-    print("✓ 模型載入完成")
-    
-    # 載入數據
-    print("\n正在載入測試數據...")
-    data_path = Path(args.data)
-    
-    all_results = []
-    
-    # 掃描所有受試者
-    subject_dirs = [d for d in data_path.iterdir() if d.is_dir()]
-    
-    print(f"找到 {len(subject_dirs)} 個受試者")
-    
-    for subject_dir in subject_dirs:
-        subject_id = subject_dir.name
-        
-        # 尋找檔案
-        rgb_csv = list(subject_dir.glob('*rgb_traces.csv'))
-        ppg_csv = list(subject_dir.glob('ppg.csv')) + list(subject_dir.glob('PPG*.csv'))
-        
-        if not rgb_csv or not ppg_csv:
-            print(f"  ✗ {subject_id}: 缺少檔案")
-            continue
-        
-        try:
-            # 載入數據
-            loader = DataLoader(data_dir=str(subject_dir), fs=84)
-            data = loader.load_subject_data(
-                subject_id=subject_id,
-                rgb_csv_path=str(rgb_csv[0]),
-                ppg_path=str(ppg_csv[0]),
-                rgb_start_frame=0
-            )
-            
-            rgb_traces = (data['r'], data['g'], data['b'])
-            ppg_gt = data['ppg']
-            
-            print(f"\n處理 {subject_id}...")
-            
-            # 評估
-            results = evaluate_single_subject(
-                model, rgb_traces, ppg_gt, subject_id, fs=84, device=args.device
-            )
-            
-            all_results.append(results)
-            
-            # 繪製單個受試者的圖
-            plot_path = output_dir / f"{subject_id}_evaluation.png"
-            plot_single_subject_results(results, plot_path)
-            
-            # 顯示指標
-            m = results['metrics']
-            print(f"  Correlation: {m['corr_std']:.4f} → {m['corr_learn']:.4f} ({(m['corr_learn']-m['corr_std'])/m['corr_std']*100:+.2f}%)")
-            print(f"  SNR: {m['snr_std']:.2f} → {m['snr_learn']:.2f} dB ({m['snr_learn']-m['snr_std']:+.2f} dB)")
-            print(f"  HR Error: {m['hr_error_std']:.2f} → {m['hr_error_learn']:.2f} bpm")
-            
-        except Exception as e:
-            print(f"  ✗ {subject_id}: {e}")
-            continue
-    
-    # 繪製總結圖
-    if all_results:
-        summary_path = output_dir / "overall_summary.png"
-        plot_overall_summary(all_results, summary_path)
-        
-        # 保存數值結果
-        results_csv = output_dir / "evaluation_metrics.csv"
-        metrics_data = []
-        for r in all_results:
-            m = r['metrics']
-            metrics_data.append({
-                'Subject': r['subject_id'],
-                'Corr_Std': m['corr_std'],
-                'Corr_Learn': m['corr_learn'],
-                'SNR_Std': m['snr_std'],
-                'SNR_Learn': m['snr_learn'],
-                'HR_GT': m['hr_gt'],
-                'HR_Std': m['hr_std'],
-                'HR_Learn': m['hr_learn'],
-                'HR_Error_Std': m['hr_error_std'],
-                'HR_Error_Learn': m['hr_error_learn']
-            })
-        
-        df = pd.DataFrame(metrics_data)
-        df.to_csv(results_csv, index=False)
-        print(f"\n  ✓ 數值結果已保存: {results_csv}")
-    
-    print("\n" + "="*60)
-    print("評估完成！")
-    print("="*60)
-    print(f"\n結果保存在: {output_dir}")
-    print(f"  - {len(all_results)} 個受試者的詳細圖表")
-    print(f"  - 總結圖: overall_summary.png")
-    print(f"  - 數值結果: evaluation_metrics.csv")
-
-
-if __name__ == "__main__":
-    main()
