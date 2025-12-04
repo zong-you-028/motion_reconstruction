@@ -92,32 +92,34 @@ def process_roi_extraction(folder_path, subject_id, output_dir=None):
     print(f"Processing: {subject_id} with {version_text}", file=sys.stderr)
     print(f"Output directory: {output_dir}", file=sys.stderr)
     
-    # Process frames 300-600
-    for frame_num in range(300, 601):
-        # Construct image path - try multiple formats
-        possible_paths = [
-            os.path.join(folder_path, f'{frame_num}.bmp'),
-            os.path.join(folder_path, f'{frame_num:03d}.bmp'),
-            os.path.join(folder_path, f'{frame_num:05d}.bmp'),
-            os.path.join(folder_path, f'00{frame_num}.bmp'),
-        ]
+    # 掃描資料夾中的所有 BMP 圖片
+    import glob
+    bmp_files = glob.glob(os.path.join(folder_path, '*.bmp'))
+    
+    if not bmp_files:
+        print(f"Warning: No BMP files found in {folder_path}", file=sys.stderr)
+        return results
+    
+    # 排序檔案（按數字順序）
+    def extract_number(filename):
+        """從檔名中提取數字"""
+        import re
+        numbers = re.findall(r'\d+', os.path.basename(filename))
+        return int(numbers[0]) if numbers else 0
+    
+    bmp_files = sorted(bmp_files, key=extract_number)
+    
+    print(f"Found {len(bmp_files)} BMP files", file=sys.stderr)
+    print(f"First file: {os.path.basename(bmp_files[0])}", file=sys.stderr)
+    print(f"Last file: {os.path.basename(bmp_files[-1])}", file=sys.stderr)
+    
+    # 處理所有圖片
+    for frame_idx, image_path in enumerate(bmp_files):
+        frame_num = frame_idx + 1  # 從 1 開始編號
         
-        image_path = None
-        for path in possible_paths:
-            if os.path.exists(path):
-                image_path = path
-                break
-        
-        if image_path is None:
-            # Image not found
-            results.append({
-                'frame': frame_num,
-                'R_avg': 0,
-                'G_avg': 0,
-                'B_avg': 0,
-                'success': 0
-            })
-            continue
+        # 每 100 幀顯示一次進度
+        if frame_num % 100 == 0:
+            print(f"Processing frame {frame_num}/{len(bmp_files)}...", file=sys.stderr)
         
         # Read image
         image = cv2.imread(image_path)
@@ -179,8 +181,9 @@ def process_roi_extraction(folder_path, subject_id, output_dir=None):
                 'success': 1
             })
             
-            # Save mask visualization for frame 300 (as sample)
-            if frame_num == 300 and not saved_visualization:
+            # Save mask visualization for middle frame (as sample)
+            middle_frame = len(bmp_files) // 2
+            if frame_num == middle_frame and not saved_visualization:
                 # Create visualization
                 skin_pic = cv2.merge([masked_B, masked_G, masked_R])
                 

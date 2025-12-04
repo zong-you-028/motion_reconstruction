@@ -1,625 +1,851 @@
-#!/usr/bin/env python3
 """
-Learnable Projection POS - 主程式
-One-Click Execution for Learnable Projection Matrix POS
-
-這個版本專門用於訓練和使用可學習投影矩陣的 POS 演算法
+可學習投影矩陣 POS - 完整整合版本
+包含：數據處理、訓練、評估、可視化
 """
 
 import os
 import sys
 import argparse
+import subprocess
+import shutil
 from pathlib import Path
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader as TorchDataLoader
+import matplotlib.pyplot as plt
+from scipy.stats import pearsonr
+from scipy import signal
+import warnings
+warnings.filterwarnings('ignore')
 
-def print_banner():
-    """顯示歡迎畫面"""
-    banner = """
-    ╔═══════════════════════════════════════════════════════════╗
-    ║                                                           ║
-    ║      Learnable Projection Matrix POS (LP-POS)            ║
-    ║         可訓練投影矩陣 POS - 一鍵執行                      ║
-    ║                                                           ║
-    ╚═══════════════════════════════════════════════════════════╝
-    
-    訓練整個 2×3 投影矩陣 P(t)，而不只是 alpha 參數
+# 導入自定義模組
+from learnable_projection_pos import (
+    ConstrainedProjectionPredictor,
+    ProjectionMatrixPredictor,
+    TemporalProjectionPredictor,
+    LearnableProjectionPOS,
+    ProjectionMatrixLoss
+)
+from data_loader import DataLoader
+# 修改這裡：使用正確的函數名稱並取別名，同時導入 Dataset 類別
+from train_projection_pos import train_projection_model as train_core, RPPGDatasetForProjection
+
+
+# ============================================================================
+#                           1. 批量數據處理
+# ============================================================================
+
+def batch_process_nas_data(nas_root, local_output, frames_folder="cam0", 
+                           ppg_filename="PPG_CMS50E_30fps.csv", subjects=None):
     """
-    print(banner)
+    批量處理 NAS 上的數據
+    """
+    print("\n" + "="*80)
+    print("批量處理 NAS 數據")
+    print("="*80)
+    
+    nas_path = Path(nas_root)
+    local_path = Path(local_output)
+    local_path.mkdir(parents=True, exist_ok=True)
+    
+    # 掃描受試者
+    if subjects is None:
+        print(f"\n正在掃描: {nas_root}")
+        subjects = []
+        for item in nas_path.iterdir():
+            if item.is_dir():
+                frames_dir = item / frames_folder
+                ppg_file = item / ppg_filename
+                if frames_dir.exists() and ppg_file.exists():
+                    subjects.append(item.name)
+                    print(f"  ✓ {item.name}")
+                else:
+                    print(f"  ✗ {item.name} (缺少檔案)")
+        subjects = sorted(subjects)
+        print(f"\n找到 {len(subjects)} 個有效受試者")
+    
+    if not subjects:
+        print("✗ 未找到任何有效受試者")
+        return 0
+    
+    # 確認
+    print(f"\n將處理 {len(subjects)} 個受試者")
+    confirm = input("確認？(y/n) [y]: ").strip().lower()
+    if confirm and confirm != 'y':
+        print("已取消")
+        return 0
+    
+    # 批量處理
+    success_count = 0
+    failed_subjects = []
+    
+    for i, subject_id in enumerate(subjects, 1):
+        print(f"\n[{i}/{len(subjects)}] 處理 {subject_id}...")
+        
+        try:
+            # 路徑設定
+            nas_frames = nas_path / subject_id / frames_folder
+            nas_ppg = nas_path / subject_id / ppg_filename
+            local_subject = local_path / subject_id
+            local_subject.mkdir(parents=True, exist_ok=True)
+            
+            # 步驟 1: 提取 ROI
+            print("  步驟 1: 提取 ROI")
+            result = subprocess.run([
+                sys.executable,
+                "facemesh_roi_cheeks_only.py",
+                str(nas_frames),
+                subject_id,
+                str(local_output)
+            ], capture_output=True, text=True, timeout=600)
+            
+            if result.returncode == 0:
+                # 解析並保存 CSV
+                output_lines = result.stdout.strip().split('\n')
+                data_lines = []
+                for line in output_lines:
+                    if ',' in line and not line.startswith('frame'):
+                        try:
+                            parts = line.split(',')
+                            if len(parts) == 5:
+                                float(parts[0])
+                                data_lines.append(line)
+                        except:
+                            continue
+                
+                if data_lines:
+                    csv_path = local_subject / f"{subject_id}_rgb_traces.csv"
+                    with open(csv_path, 'w') as f:
+                        f.write("frame,R_avg,G_avg,B_avg,success\n")
+                        f.write('\n'.join(data_lines))
+                    print(f"    ✓ RGB CSV: {len(data_lines)} 幀")
+                else:
+                    print(f"    ✗ 未獲取到有效數據")
+                    failed_subjects.append(subject_id)
+                    continue
+            else:
+                print(f"    ✗ ROI 提取失敗")
+                if result.stderr:
+                    print(f"    錯誤: {result.stderr[:200]}")
+                failed_subjects.append(subject_id)
+                continue
+            
+            # 步驟 2: 複製 PPG
+            print("  步驟 2: 複製 PPG")
+            local_ppg = local_subject / "ppg.csv"
+            shutil.copy(nas_ppg, local_ppg)
+            print(f"    ✓ PPG 已複製")
+            
+            # 步驟 3: 驗證
+            rgb_csv = local_subject / f"{subject_id}_rgb_traces.csv"
+            if rgb_csv.exists() and local_ppg.exists():
+                print(f"  ✅ {subject_id} 處理完成")
+                success_count += 1
+            else:
+                print(f"  ❌ {subject_id} 驗證失敗")
+                failed_subjects.append(subject_id)
+                
+        except Exception as e:
+            print(f"  ✗ 異常: {e}")
+            failed_subjects.append(subject_id)
+    
+    # 總結
+    print("\n" + "="*80)
+    print(f"處理完成: 成功 {success_count}/{len(subjects)}")
+    if failed_subjects:
+        print(f"失敗的受試者: {', '.join(failed_subjects)}")
+    print("="*80)
+    
+    return success_count
 
-def check_dependencies():
-    """檢查必要的依賴套件"""
-    required_packages = {
-        'torch': 'PyTorch',
-        'numpy': 'NumPy',
-        'scipy': 'SciPy',
-        'pandas': 'Pandas',
-        'cv2': 'OpenCV (opencv-python)',
-        'mediapipe': 'MediaPipe',
-        'matplotlib': 'Matplotlib'
+
+# ============================================================================
+#                           2. 數據診斷
+# ============================================================================
+
+def diagnose_subject_data(subject_dir):
+    """
+    診斷單個受試者的數據質量
+    """
+    subject_dir = Path(subject_dir)
+    subject_id = subject_dir.name
+    
+    result = {
+        'subject_id': subject_id,
+        'is_valid': True,
+        'issues': []
     }
     
-    missing_packages = []
+    # 檢查檔案
+    rgb_csv = list(subject_dir.glob('*rgb_traces.csv'))
+    ppg_csv = list(subject_dir.glob('ppg.csv')) + list(subject_dir.glob('PPG*.csv'))
     
-    print("正在檢查依賴套件...")
-    for package, name in required_packages.items():
-        try:
-            __import__(package)
-            print(f"  ✓ {name}")
-        except ImportError:
-            print(f"  ✗ {name} - 未安裝")
-            missing_packages.append(name)
-    
-    if missing_packages:
-        print("\n⚠️  缺少以下套件，請先安裝：")
-        print(f"pip install {' '.join([p.split()[0].lower().replace('opencv', 'opencv-python') for p in missing_packages])}")
-        return False
-    
-    print("\n✓ 所有依賴套件已安裝\n")
-    return True
-
-def show_menu():
-    """顯示主選單"""
-    menu = """
-    ┌─────────────────────────────────────────────────────────┐
-    │  請選擇要執行的功能：                                      │
-    ├─────────────────────────────────────────────────────────┤
-    │  1. 快速測試 (使用合成數據訓練)                           │
-    │  2. 訓練模型 (使用實際數據)                               │
-    │  3. 評估模型                                             │
-    │  4. 提取 ROI (從影片幀)                                  │
-    │  5. 使用訓練好的模型推論                                  │
-    │  6. 比較三種模型架構                                      │
-    │  0. 退出                                                 │
-    └─────────────────────────────────────────────────────────┘
-    """
-    print(menu)
-
-def quick_test():
-    """選項 1: 快速測試"""
-    print("\n" + "="*60)
-    print("選項 1: 快速測試 (使用合成數據)")
-    print("="*60)
-    
-    print("\n這將使用合成數據快速訓練模型")
-    print("預計時間：5-10 分鐘\n")
-    
-    confirm = input("確認開始？(y/n) [y]: ").strip().lower()
-    if confirm and confirm != 'y':
-        print("已取消")
-        return
+    if not rgb_csv or not ppg_csv:
+        result['is_valid'] = False
+        result['issues'].append("缺少必要檔案")
+        return result
     
     try:
-        print("\n正在生成測試數據...")
-        from demo_usage import generate_synthetic_rppg_data
-        import numpy as np
+        # RGB 檢查
+        df_rgb = pd.read_csv(rgb_csv[0])
         
-        # 生成測試數據
-        rgb_traces = []
-        ppg_signals = []
+        if 'success' in df_rgb.columns:
+            success_rate = (df_rgb['success'] == 1).sum() / len(df_rgb)
+            if success_rate < 0.5:
+                result['is_valid'] = False
+                result['issues'].append(f"RGB 成功率過低 ({success_rate*100:.1f}%)")
         
-        for i in range(20):
-            print(f"  生成受試者 {i+1}/20...", end='\r')
-            r, g, b, ppg, _ = generate_synthetic_rppg_data(
-                duration=30, fs=84, 
-                hr=np.random.uniform(60, 100),
-                motion_strength=np.random.uniform(0.2, 0.6)
-            )
-            rgb_traces.append((r, g, b))
-            ppg_signals.append(ppg)
+        for ch in ['R_avg', 'G_avg', 'B_avg']:
+            if ch in df_rgb.columns and df_rgb[ch].std() < 1:
+                result['is_valid'] = False
+                result['issues'].append(f"{ch} 變化過小")
         
-        print("\n✓ 數據生成完成！")
+        # PPG 檢查
+        try:
+            ppg = pd.read_csv(ppg_csv[0])
+            ppg_values = ppg.iloc[:, 0].values
+        except:
+            ppg = pd.read_csv(ppg_csv[0], header=None)
+            ppg_values = ppg[0].values
         
-        # 訓練
-        print("\n開始訓練...")
-        from train_projection_pos import train_projection_model, RPPGDatasetForProjection
-        from learnable_projection_pos import ConstrainedProjectionPredictor
-        from torch.utils.data import DataLoader
-        import torch
+        if len(np.unique(ppg_values)) < 10:
+            result['is_valid'] = False
+            result['issues'].append("PPG 是常數或接近常數")
         
-        # 分割數據
-        split_idx = int(0.8 * len(rgb_traces))
-        train_rgb = rgb_traces[:split_idx]
-        train_ppg = ppg_signals[:split_idx]
-        val_rgb = rgb_traces[split_idx:]
-        val_ppg = ppg_signals[split_idx:]
-        
-        # 創建數據集
-        train_dataset = RPPGDatasetForProjection(
-            train_rgb, train_ppg, window_length=128, stride=32, mode='feature'
-        )
-        val_dataset = RPPGDatasetForProjection(
-            val_rgb, val_ppg, window_length=128, stride=64, mode='feature'
-        )
-        
-        train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
-        
-        # 創建模型
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        print(f"\n使用設備: {device}")
-        
-        model = ConstrainedProjectionPredictor(
-            input_dim=10, hidden_dim=64, use_residual=True
-        )
-        print(f"模型參數量: {sum(p.numel() for p in model.parameters())}")
-        
-        # 訓練
-        trained_model, train_losses, val_losses = train_projection_model(
-            model, train_loader, val_loader,
-            num_epochs=30,
-            learning_rate=0.001,
-            device=device,
-            save_dir='./projection_models',
-            model_type='feature'
-        )
-        
-        print("\n" + "="*60)
-        print("✓ 訓練完成！")
-        print("="*60)
-        print(f"\n結果保存在: ./projection_models/")
-        print(f"  - best_projection_model.pth")
-        print(f"  - projection_training_curves.png")
-        print(f"\n最佳驗證損失: {min(val_losses):.4f}")
-        
+        if ppg_values.std() < 1:
+            result['is_valid'] = False
+            result['issues'].append("PPG 標準差過小")
+            
     except Exception as e:
-        print(f"\n✗ 錯誤：{e}")
-        import traceback
-        traceback.print_exc()
+        result['is_valid'] = False
+        result['issues'].append(f"讀取錯誤: {e}")
+    
+    return result
 
-def train_with_real_data():
-    """選項 2: 使用實際數據訓練"""
-    print("\n" + "="*60)
-    print("選項 2: 訓練模型 (使用實際數據)")
-    print("="*60)
+
+def diagnose_all_subjects(data_dir):
+    """診斷所有受試者"""
+    print("\n" + "="*80)
+    print("診斷所有受試者數據")
+    print("="*80)
     
-    print("\n此功能需要已經提取好的 RGB traces 和 PPG 數據")
-    print("數據格式要求：")
-    print("  - RGB traces: CSV 檔案 (frame, R_avg, G_avg, B_avg, success)")
-    print("  - PPG: .mat 或 .csv 檔案")
+    data_path = Path(data_dir)
+    subject_dirs = [d for d in data_path.iterdir() if d.is_dir()]
     
-    data_dir = input("\n請輸入數據目錄路徑: ").strip()
-    if not data_dir or not os.path.exists(data_dir):
-        print("\n✗ 錯誤：目錄不存在")
-        return
+    valid_subjects = []
+    invalid_subjects = []
     
-    output_dir = input("請輸入輸出目錄路徑 [預設: ./projection_models]: ").strip()
-    if not output_dir:
-        output_dir = './projection_models'
+    for subject_dir in sorted(subject_dirs):
+        result = diagnose_subject_data(subject_dir)
+        
+        if result['is_valid']:
+            print(f"  ✓ {result['subject_id']}")
+            valid_subjects.append(result['subject_id'])
+        else:
+            print(f"  ✗ {result['subject_id']}: {', '.join(result['issues'])}")
+            invalid_subjects.append(result)
     
-    print("\n選擇模型類型：")
-    print("  1. ConstrainedProjectionPredictor (推薦，Residual 模式)")
-    print("  2. ProjectionMatrixPredictor (基礎)")
-    print("  3. TemporalProjectionPredictor (時序，LSTM)")
+    print("\n" + "="*80)
+    print(f"有效受試者: {len(valid_subjects)}")
+    print(f"無效受試者: {len(invalid_subjects)}")
     
-    model_choice = input("請選擇 [預設: 1]: ").strip()
-    if not model_choice:
-        model_choice = '1'
+    if invalid_subjects:
+        print("\n建議排除以下受試者:")
+        for r in invalid_subjects:
+            print(f"  - {r['subject_id']}: {', '.join(r['issues'])}")
     
-    epochs = input("訓練輪數 [預設: 50]: ").strip()
-    num_epochs = int(epochs) if epochs else 50
+    print("="*80)
     
-    print("\n準備訓練...")
+    return valid_subjects, invalid_subjects
+
+
+# ============================================================================
+#                           3. 模型訓練
+# ============================================================================
+
+def train_projection_model(data_dir, output_dir, model_type=1, epochs=50, 
+                           batch_size=32, learning_rate=0.001, device=None):
+    """
+    訓練投影矩陣模型
+    """
+    print("\n" + "="*80)
+    print("訓練投影矩陣模型")
+    print("="*80)
+    
+    if device is None:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    print(f"\n配置:")
     print(f"  數據目錄: {data_dir}")
     print(f"  輸出目錄: {output_dir}")
-    print(f"  訓練輪數: {num_epochs}")
+    print(f"  模型類型: {model_type}")
+    print(f"  訓練輪數: {epochs}")
+    print(f"  設備: {device}")
     
-    confirm = input("\n確認執行？(y/n) [y]: ").strip().lower()
-    if confirm and confirm != 'y':
-        print("已取消")
+    # 創建輸出目錄
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # 載入數據
+    print("\n正在載入數據...")
+    data_path = Path(data_dir)
+    
+    # 診斷並過濾無效數據
+    valid_subjects, invalid_subjects = diagnose_all_subjects(data_dir)
+    
+    if len(valid_subjects) < 3:
+        print(f"\n✗ 有效受試者太少 ({len(valid_subjects)})，至少需要 3 個")
+        return None
+    
+    # 載入有效受試者的數據
+    loader = DataLoader(data_dir=str(data_path), fs=84)
+    
+    rgb_traces = []
+    ppg_signals = []
+    
+    for subject_id in valid_subjects:
+        subject_dir = data_path / subject_id
+        rgb_csv = list(subject_dir.glob('*rgb_traces.csv'))
+        ppg_csv = list(subject_dir.glob('ppg.csv')) + list(subject_dir.glob('PPG*.csv'))
+        
+        if rgb_csv and ppg_csv:
+            try:
+                data = loader.load_subject_data(
+                    subject_id=subject_id,
+                    rgb_csv_path=str(rgb_csv[0]),
+                    ppg_path=str(ppg_csv[0]),
+                    rgb_start_frame=0
+                )
+                rgb_traces.append((data['r'], data['g'], data['b']))
+                ppg_signals.append(data['ppg'])
+                print(f"  ✓ {subject_id}: {len(data['r'])} 樣本")
+            except Exception as e:
+                print(f"  ✗ {subject_id}: {e}")
+    
+    if len(rgb_traces) == 0:
+        print("\n✗ 未能載入任何數據")
+        return None
+    
+    print(f"\n✓ 成功載入 {len(rgb_traces)} 個受試者")
+    
+    # 分割數據與建立 Dataset/DataLoader
+    print("\n正在準備訓練數據 (Dataset & DataLoader)...")
+    split_idx = int(0.8 * len(rgb_traces))
+    train_rgb = rgb_traces[:split_idx]
+    train_ppg = ppg_signals[:split_idx]
+    val_rgb = rgb_traces[split_idx:]
+    val_ppg = ppg_signals[split_idx:]
+
+    # 根據模型類型決定 Dataset 模式
+    # Model type 1 & 2 -> 'feature', Model type 3 -> 'sequence'
+    dataset_mode = 'sequence' if model_type == 3 else 'feature'
+    print(f"  Dataset 模式: {dataset_mode}")
+
+    # 創建 Dataset
+    train_dataset = RPPGDatasetForProjection(
+        train_rgb, train_ppg, window_length=128, stride=32, mode=dataset_mode
+    )
+    val_dataset = RPPGDatasetForProjection(
+        val_rgb, val_ppg, window_length=128, stride=64, mode=dataset_mode
+    )
+    
+    # 創建 DataLoader
+    train_loader = TorchDataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = TorchDataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+    print(f"  訓練 Batch 數: {len(train_loader)}")
+    print(f"  驗證 Batch 數: {len(val_loader)}")
+
+    # 創建模型
+    print("\n正在創建模型...")
+    
+    if model_type == 1:
+        model = ConstrainedProjectionPredictor(
+            input_dim=10, 
+            hidden_dim=64, 
+            use_residual=True
+        )
+        model_name = "ConstrainedProjectionPredictor"
+    elif model_type == 2:
+        model = ProjectionMatrixPredictor(
+            input_dim=10, 
+            hidden_dim=64
+        )
+        model_name = "ProjectionMatrixPredictor"
+    elif model_type == 3:
+        model = TemporalProjectionPredictor(
+            window_size=128, 
+            hidden_dim=64
+        )
+        model_name = "TemporalProjectionPredictor"
+    else:
+        print(f"✗ 無效的模型類型: {model_type}")
+        return None
+    
+    print(f"  模型: {model_name}")
+    print(f"  參數量: {sum(p.numel() for p in model.parameters())}")
+    
+    # 訓練
+    print("\n開始訓練...")
+    
+    # 使用別名 train_core 並傳入 DataLoader
+    model, train_losses, val_losses = train_core(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        num_epochs=epochs,
+        learning_rate=learning_rate,
+        device=device,
+        save_dir=str(output_path),
+        model_type=dataset_mode
+    )
+    
+    best_model_path = str(output_path / 'best_projection_model.pth')
+    
+    print(f"\n✓ 訓練完成")
+    print(f"  最佳模型路徑: {best_model_path}")
+    
+    return best_model_path
+
+
+# ============================================================================
+#                           4. 模型評估
+# ============================================================================
+
+def calculate_hr_from_rppg(rppg_signal, fs):
+    """計算心率"""
+    n = len(rppg_signal)
+    fft_vals = np.fft.fft(rppg_signal)
+    fft_freq = np.fft.fftfreq(n, 1/fs)
+    
+    pos_mask = (fft_freq > 0) & (fft_freq < 5)
+    fft_freq = fft_freq[pos_mask]
+    fft_vals = np.abs(fft_vals[pos_mask])
+    
+    hr_mask = (fft_freq >= 0.7) & (fft_freq <= 4.0)
+    
+    if not np.any(hr_mask):
+        return 0
+    
+    hr_freq = fft_freq[hr_mask]
+    hr_fft = fft_vals[hr_mask]
+    
+    peak_idx = np.argmax(hr_fft)
+    hr_hz = hr_freq[peak_idx]
+    hr_bpm = hr_hz * 60
+    
+    return hr_bpm
+
+
+def evaluate_single_subject(model, rgb_traces, ppg_gt, subject_id, fs=84, device='cpu'):
+    """評估單個受試者"""
+    r, g, b = rgb_traces
+    
+    pos = LearnableProjectionPOS(window_length=128, fs=fs)
+    
+    # 標準 POS
+    rppg_standard = pos.process_standard(r, g, b)
+    
+    # 可學習 POS
+    model.eval()
+    with torch.no_grad():
+        rppg_learned, P_history = pos.process_learnable(r, g, b, model, use_features=True)
+    
+    # 去除初始段
+    valid_start = 128
+    rppg_standard = rppg_standard[valid_start:]
+    rppg_learned = rppg_learned[valid_start:]
+    ppg_gt = ppg_gt[valid_start:]
+    
+    # 確保長度一致
+    min_len = min(len(rppg_standard), len(rppg_learned), len(ppg_gt))
+    rppg_standard = rppg_standard[:min_len]
+    rppg_learned = rppg_learned[:min_len]
+    ppg_gt = ppg_gt[:min_len]
+    
+    # 帶通濾波
+    nyq = fs / 2
+    b_filt, a_filt = signal.butter(4, [0.7/nyq, 4.0/nyq], btype='band')
+    
+    rppg_std_filt = signal.filtfilt(b_filt, a_filt, rppg_standard)
+    rppg_learn_filt = signal.filtfilt(b_filt, a_filt, rppg_learned)
+    ppg_gt_filt = signal.filtfilt(b_filt, a_filt, ppg_gt)
+    
+    # 計算指標
+    corr_std, _ = pearsonr(rppg_std_filt, ppg_gt_filt)
+    corr_learn, _ = pearsonr(rppg_learn_filt, ppg_gt_filt)
+    
+    # SNR
+    def calculate_snr(sig, fs):
+        n = len(sig)
+        fft_vals = np.fft.fft(sig)
+        fft_freq = np.fft.fftfreq(n, 1/fs)
+        
+        pos_mask = fft_freq > 0
+        fft_vals = np.abs(fft_vals[pos_mask])
+        fft_freq = fft_freq[pos_mask]
+        
+        hr_mask = (fft_freq >= 0.7) & (fft_freq <= 4.0)
+        signal_power = np.sum(fft_vals[hr_mask] ** 2)
+        noise_power = np.sum(fft_vals[~hr_mask] ** 2)
+        
+        if noise_power > 0:
+            return 10 * np.log10(signal_power / noise_power)
+        return 0
+    
+    snr_std = calculate_snr(rppg_std_filt, fs)
+    snr_learn = calculate_snr(rppg_learn_filt, fs)
+    
+    # 心率
+    hr_gt = calculate_hr_from_rppg(ppg_gt_filt, fs)
+    hr_std = calculate_hr_from_rppg(rppg_std_filt, fs)
+    hr_learn = calculate_hr_from_rppg(rppg_learn_filt, fs)
+    
+    return {
+        'subject_id': subject_id,
+        'metrics': {
+            'corr_std': corr_std,
+            'corr_learn': corr_learn,
+            'snr_std': snr_std,
+            'snr_learn': snr_learn,
+            'hr_gt': hr_gt,
+            'hr_std': hr_std,
+            'hr_learn': hr_learn,
+            'hr_error_std': abs(hr_std - hr_gt),
+            'hr_error_learn': abs(hr_learn - hr_gt)
+        }
+    }
+
+
+def evaluate_model(model_path, data_dir, output_dir, device=None):
+    """評估模型"""
+    print("\n" + "="*80)
+    print("模型評估")
+    print("="*80)
+    
+    if device is None:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    print(f"\n配置:")
+    print(f"  模型: {model_path}")
+    print(f"  數據: {data_dir}")
+    print(f"  輸出: {output_dir}")
+    print(f"  設備: {device}")
+    
+    # 創建輸出目錄
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # 載入模型
+    print("\n正在載入模型...")
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    
+    model = ConstrainedProjectionPredictor(input_dim=10, hidden_dim=64, use_residual=True)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.to(device)
+    model.eval()
+    print("  ✓ 模型載入完成")
+    
+    # 診斷並載入數據
+    print("\n正在載入數據...")
+    valid_subjects, invalid_subjects = diagnose_all_subjects(data_dir)
+    
+    if len(valid_subjects) == 0:
+        print("✗ 沒有有效的受試者數據")
         return
     
-    try:
-        from data_loader import DataLoader
-        from train_projection_pos import train_projection_model, RPPGDatasetForProjection
-        from learnable_projection_pos import (
-            ProjectionMatrixPredictor,
-            ConstrainedProjectionPredictor,
-            TemporalProjectionPredictor
-        )
-        from torch.utils.data import DataLoader as TorchDataLoader
-        import torch
+    print(f"\n將評估 {len(valid_subjects)} 個受試者")
+    
+    # 載入並評估
+    data_path = Path(data_dir)
+    loader = DataLoader(data_dir=str(data_path), fs=84)
+    
+    all_results = []
+    
+    for subject_id in valid_subjects:
+        subject_dir = data_path / subject_id
+        rgb_csv = list(subject_dir.glob('*rgb_traces.csv'))
+        ppg_csv = list(subject_dir.glob('ppg.csv')) + list(subject_dir.glob('PPG*.csv'))
         
-        # 載入數據
-        print("\n正在載入數據...")
+        if not rgb_csv or not ppg_csv:
+            continue
         
-        # 掃描數據目錄
-        data_path = Path(data_dir)
-        rgb_traces = []
-        ppg_signals = []
-        
-        # 收集所有受試者的檔案路徑
-        subject_list = []
-        
-        # 檢查子目錄
-        for subject_dir in data_path.iterdir():
-            if subject_dir.is_dir():
-                csv_files = list(subject_dir.glob('*rgb_traces.csv'))
-                ppg_files = list(subject_dir.glob('ppg.*')) + list(subject_dir.glob('PPG*.csv'))
-                
-                if csv_files and ppg_files:
-                    subject_list.append({
-                        'subject_id': subject_dir.name,
-                        'rgb_csv_path': str(csv_files[0]),
-                        'ppg_path': str(ppg_files[0]),
-                        'rgb_start_frame': 0
-                    })
-        
-        # 檢查根目錄（單個受試者情況）
-        csv_files_root = list(data_path.glob('*rgb_traces.csv'))
-        ppg_files_root = list(data_path.glob('ppg.*')) + list(data_path.glob('PPG*.csv'))
-        
-        if csv_files_root and ppg_files_root:
-            subject_list.append({
-                'subject_id': 'single_subject',
-                'rgb_csv_path': str(csv_files_root[0]),
-                'ppg_path': str(ppg_files_root[0]),
-                'rgb_start_frame': 0
+        try:
+            print(f"\n處理 {subject_id}...")
+            
+            # 載入數據
+            data = loader.load_subject_data(
+                subject_id=subject_id,
+                rgb_csv_path=str(rgb_csv[0]),
+                ppg_path=str(ppg_csv[0]),
+                rgb_start_frame=0
+            )
+            
+            rgb_traces = (data['r'], data['g'], data['b'])
+            ppg_gt = data['ppg']
+            
+            # 評估
+            results = evaluate_single_subject(
+                model, rgb_traces, ppg_gt, subject_id, fs=84, device=device
+            )
+            
+            all_results.append(results)
+            
+            # 顯示指標
+            m = results['metrics']
+            print(f"  Correlation: {m['corr_std']:.4f} → {m['corr_learn']:.4f} ({(m['corr_learn']-m['corr_std'])/abs(m['corr_std'])*100:+.2f}%)")
+            print(f"  SNR: {m['snr_std']:.2f} → {m['snr_learn']:.2f} dB ({m['snr_learn']-m['snr_std']:+.2f} dB)")
+            print(f"  HR Error: {m['hr_error_std']:.2f} → {m['hr_error_learn']:.2f} bpm")
+            
+        except Exception as e:
+            print(f"  ✗ 評估失敗: {e}")
+            continue
+    
+    # 保存結果
+    if all_results:
+        results_csv = output_path / "evaluation_metrics.csv"
+        metrics_data = []
+        for r in all_results:
+            m = r['metrics']
+            metrics_data.append({
+                'Subject': r['subject_id'],
+                'Corr_Std': m['corr_std'],
+                'Corr_Learn': m['corr_learn'],
+                'SNR_Std': m['snr_std'],
+                'SNR_Learn': m['snr_learn'],
+                'HR_GT': m['hr_gt'],
+                'HR_Std': m['hr_std'],
+                'HR_Learn': m['hr_learn'],
+                'HR_Error_Std': m['hr_error_std'],
+                'HR_Error_Learn': m['hr_error_learn']
             })
         
-        if len(subject_list) == 0:
-            print("\n✗ 錯誤：未找到有效的數據")
-            print("\n請確認數據結構：")
-            print("  方式 1（多受試者）：")
-            print("    data_dir/")
-            print("      subject1/")
-            print("        subject1_rgb_traces.csv")
-            print("        ppg.csv")
-            print("      subject2/")
-            print("        subject2_rgb_traces.csv")
-            print("        ppg.csv")
-            print("\n  方式 2（單受試者）：")
-            print("    data_dir/")
-            print("      xxx_rgb_traces.csv")
-            print("      ppg.csv")
-            return
+        df = pd.DataFrame(metrics_data)
+        df.to_csv(results_csv, index=False)
+        print(f"\n✓ 數值結果已保存: {results_csv}")
         
-        # 使用 DataLoader 載入所有數據
-        loader = DataLoader(data_dir=str(data_path), fs=84)
-        all_data = loader.load_multiple_subjects(subject_list)
-        
-        if len(all_data) == 0:
-            print("\n✗ 錯誤：未能載入任何數據")
-            return
-        
-        # 轉換為訓練格式
-        for data in all_data:
-            r = data['r']
-            g = data['g']
-            b = data['b']
-            ppg = data['ppg']
-            
-            rgb_traces.append((r, g, b))
-            ppg_signals.append(ppg)
-        
-        if len(rgb_traces) == 0:
-            print("\n✗ 錯誤：未找到有效的數據")
-            return
-        
-        print(f"\n✓ 載入 {len(rgb_traces)} 個受試者的數據")
-        
-        # 分割數據
-        split_idx = int(0.8 * len(rgb_traces))
-        train_rgb = rgb_traces[:split_idx]
-        train_ppg = ppg_signals[:split_idx]
-        val_rgb = rgb_traces[split_idx:]
-        val_ppg = ppg_signals[split_idx:]
-        
-        print(f"  訓練集: {len(train_rgb)} 個受試者")
-        print(f"  驗證集: {len(val_rgb)} 個受試者")
-        
-        # 創建模型
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        print(f"\n使用設備: {device}")
-        
-        if model_choice == '1':
-            model = ConstrainedProjectionPredictor(input_dim=10, hidden_dim=64, use_residual=True)
-            model_type = 'feature'
-            dataset_mode = 'feature'
-            print("使用模型: ConstrainedProjectionPredictor (Residual)")
-        elif model_choice == '2':
-            model = ProjectionMatrixPredictor(input_dim=10, hidden_dim=64)
-            model_type = 'feature'
-            dataset_mode = 'feature'
-            print("使用模型: ProjectionMatrixPredictor")
-        else:
-            model = TemporalProjectionPredictor(window_size=128, hidden_dim=64)
-            model_type = 'sequence'
-            dataset_mode = 'sequence'
-            print("使用模型: TemporalProjectionPredictor (LSTM)")
-        
-        print(f"模型參數量: {sum(p.numel() for p in model.parameters())}")
-        
-        # 創建數據集
-        print("\n創建數據集...")
-        train_dataset = RPPGDatasetForProjection(
-            train_rgb, train_ppg, window_length=128, stride=32, mode=dataset_mode
-        )
-        val_dataset = RPPGDatasetForProjection(
-            val_rgb, val_ppg, window_length=128, stride=64, mode=dataset_mode
-        )
-        
-        train_loader = TorchDataLoader(train_dataset, batch_size=16, shuffle=True)
-        val_loader = TorchDataLoader(val_dataset, batch_size=16, shuffle=False)
-        
-        print(f"  訓練樣本: {len(train_dataset)}")
-        print(f"  驗證樣本: {len(val_dataset)}")
-        
-        # 訓練
-        print("\n開始訓練...")
-        trained_model, train_losses, val_losses = train_projection_model(
-            model, train_loader, val_loader,
-            num_epochs=num_epochs,
-            learning_rate=0.001,
-            device=device,
-            save_dir=output_dir,
-            model_type=model_type
-        )
-        
-        print("\n" + "="*60)
-        print("✓ 訓練完成！")
-        print("="*60)
-        print(f"\n結果保存在: {output_dir}/")
-        print(f"最佳驗證損失: {min(val_losses):.4f}")
-        
-    except Exception as e:
-        print(f"\n✗ 錯誤：{e}")
-        import traceback
-        traceback.print_exc()
+        # 顯示統計
+        print("\n" + "="*80)
+        print("整體統計")
+        print("="*80)
+        print(f"  Correlation: {df['Corr_Std'].mean():.4f} → {df['Corr_Learn'].mean():.4f} ({(df['Corr_Learn'].mean()-df['Corr_Std'].mean())/abs(df['Corr_Std'].mean())*100:+.2f}%)")
+        print(f"  SNR: {df['SNR_Std'].mean():.2f} → {df['SNR_Learn'].mean():.2f} dB ({df['SNR_Learn'].mean()-df['SNR_Std'].mean():+.2f} dB)")
+        print(f"  HR Error: {df['HR_Error_Std'].mean():.2f} → {df['HR_Error_Learn'].mean():.2f} bpm")
+        print("="*80)
+    
+    return all_results
 
-def evaluate_model():
-    """選項 3: 評估模型"""
-    print("\n" + "="*60)
-    print("選項 3: 評估模型")
-    print("="*60)
-    
-    model_path = input("\n請輸入模型檔案路徑 (.pth): ").strip()
-    if not model_path or not os.path.exists(model_path):
-        print("\n✗ 錯誤：模型檔案不存在")
-        return
-    
-    data_dir = input("請輸入測試數據目錄: ").strip()
-    if not data_dir or not os.path.exists(data_dir):
-        print("\n✗ 錯誤：目錄不存在")
-        return
-    
-    print("\n功能開發中...")
-    print("目前請使用 evaluate_adaptive_pos.py 進行評估")
 
-def extract_roi():
-    """選項 4: 提取 ROI"""
-    print("\n" + "="*60)
-    print("選項 4: 提取 ROI")
-    print("="*60)
-    
-    frames_folder = input("\n請輸入影片幀所在目錄 (可以是 NAS 路徑): ").strip()
-    if not frames_folder or not os.path.exists(frames_folder):
-        print("\n✗ 錯誤：目錄不存在")
-        return
-    
-    subject_id = input("請輸入受試者 ID: ").strip()
-    if not subject_id:
-        print("\n✗ 錯誤：需要提供受試者 ID")
-        return
-    
-    output_dir = input("請輸入輸出目錄 (本地路徑，預設: ./FaceMesh_Output): ").strip()
-    if not output_dir:
-        output_dir = os.path.join(os.getcwd(), 'FaceMesh_Output')
-    
-    print(f"\n📁 讀取來源: {frames_folder}")
-    print(f"💾 輸出目錄: {output_dir}")
-    
-    try:
-        from facemesh_roi_cheeks_only import process_roi_extraction
-        import pandas as pd
-        
-        print(f"\n正在處理 {subject_id}...")
-        results = process_roi_extraction(frames_folder, subject_id, output_dir)
-        
-        # 保存 CSV
-        csv_path = os.path.join(output_dir, f'{subject_id}_rgb_traces.csv')
-        df = pd.DataFrame(results)
-        df.to_csv(csv_path, index=False)
-        
-        print(f"\n✓ ROI 提取完成！")
-        print(f"結果已輸出（共 {len(results)} 幀）")
-        print(f"CSV 檔案: {csv_path}")
-        
-    except Exception as e:
-        print(f"\n✗ 錯誤：{e}")
-        import traceback
-        traceback.print_exc()
+# ============================================================================
+#                           5. 主選單
+# ============================================================================
 
-def inference_with_model():
-    """選項 5: 使用訓練好的模型推論"""
-    print("\n" + "="*60)
-    print("選項 5: 模型推論")
-    print("="*60)
-    
-    model_path = input("\n請輸入模型檔案路徑 (.pth): ").strip()
-    if not model_path or not os.path.exists(model_path):
-        print("\n✗ 錯誤：模型檔案不存在")
-        return
-    
-    csv_path = input("請輸入 RGB traces CSV 檔案路徑: ").strip()
-    if not csv_path or not os.path.exists(csv_path):
-        print("\n✗ 錯誤：CSV 檔案不存在")
-        return
-    
-    try:
-        import torch
-        import pandas as pd
-        import numpy as np
-        from learnable_projection_pos import (
-            ConstrainedProjectionPredictor,
-            LearnableProjectionPOS
-        )
-        from scipy.stats import pearsonr
-        
-        # 載入模型
-        print("\n正在載入模型...")
-        checkpoint = torch.load(model_path, map_location='cpu')
-        
-        model = ConstrainedProjectionPredictor(input_dim=10, hidden_dim=64, use_residual=True)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        model.eval()
-        print("✓ 模型載入完成")
-        
-        # 載入數據
-        print("\n正在載入 RGB 數據...")
-        df = pd.read_csv(csv_path)
-        df = df[df['success'] == 1]
-        
-        r_buf = df['R_avg'].values
-        g_buf = df['G_avg'].values
-        b_buf = df['B_avg'].values
-        print(f"✓ 數據載入完成（{len(r_buf)} 幀）")
-        
-        # 處理
-        print("\n正在處理...")
-        pos = LearnableProjectionPOS(window_length=128, fs=84)
-        
-        # 標準 POS
-        rppg_standard = pos.process_standard(r_buf, g_buf, b_buf)
-        
-        # 可學習投影矩陣 POS
-        rppg_learnable, P_history = pos.process_learnable(
-            r_buf, g_buf, b_buf, model, use_features=True
-        )
-        
-        # 計算心率
-        from learnable_projection_pos import calculate_hr_from_rppg
-        hr_std = calculate_hr_from_rppg(rppg_standard[128:], fs=84)
-        hr_learn = calculate_hr_from_rppg(rppg_learnable[128:], fs=84)
-        
-        # 顯示結果
-        print("\n" + "="*60)
-        print("處理完成！")
-        print("="*60)
-        
-        print(f"\n標準 POS:")
-        print(f"  心率: {hr_std:.1f} bpm")
-        
-        print(f"\n可學習投影矩陣 POS:")
-        print(f"  心率: {hr_learn:.1f} bpm")
-        
-        print(f"\n投影矩陣變化:")
-        print(f"  標準 POS: [[0, 1, -1], [-2, 1, 1]]")
-        print(f"  學習到的 P(t=0):\n    {P_history[0]}")
-        P_standard = np.array([[0, 1, -1], [-2, 1, 1]])
-        deviation = np.mean(np.abs(P_history - P_standard))
-        print(f"  平均偏離標準 POS: {deviation:.3f}")
-        
-        # 可視化
-        try:
-            import matplotlib.pyplot as plt
-            
-            fig, axes = plt.subplots(2, 3, figsize=(15, 8))
-            fig.suptitle('投影矩陣隨時間變化', fontsize=16)
-            
-            for i in range(2):
-                for j in range(3):
-                    ax = axes[i, j]
-                    ax.plot(P_history[:, i, j], label='Learned', linewidth=2)
-                    ax.axhline(P_standard[i, j], color='r', linestyle='--', 
-                             label='Standard', linewidth=2)
-                    ax.set_title(f'P[{i},{j}]')
-                    ax.set_xlabel('Time (frames)')
-                    ax.set_ylabel('Value')
-                    ax.legend()
-                    ax.grid(True, alpha=0.3)
-            
-            plt.tight_layout()
-            output_path = 'projection_matrix_evolution.png'
-            plt.savefig(output_path, dpi=150)
-            print(f"\n可視化圖已保存: {output_path}")
-        except:
-            pass
-        
-    except Exception as e:
-        print(f"\n✗ 錯誤：{e}")
-        import traceback
-        traceback.print_exc()
+def print_menu():
+    """顯示主選單"""
+    print("\n" + "="*80)
+    print("可學習投影矩陣 POS - 完整工具集")
+    print("="*80)
+    print("\n選擇功能:")
+    print("  1. 批量處理 NAS 數據（從影片提取 ROI + PPG）")
+    print("  2. 診斷數據質量")
+    print("  3. 訓練模型")
+    print("  4. 評估模型")
+    print("  5. 完整流程（數據處理 → 訓練 → 評估）")
+    print("  0. 退出")
+    print("="*80)
 
-def compare_models():
-    """選項 6: 比較三種模型架構"""
-    print("\n" + "="*60)
-    print("選項 6: 比較三種模型架構")
-    print("="*60)
-    
-    print("\n將訓練和比較三種模型：")
-    print("  1. ProjectionMatrixPredictor (基礎)")
-    print("  2. ConstrainedProjectionPredictor (Residual)")
-    print("  3. TemporalProjectionPredictor (LSTM)")
-    
-    print("\n預計時間：15-30 分鐘")
-    
-    confirm = input("\n確認開始？(y/n) [y]: ").strip().lower()
-    if confirm and confirm != 'y':
-        print("已取消")
-        return
-    
-    print("\n功能開發中...")
-    print("目前請分別運行選項 1 三次，每次選擇不同的模型")
 
-def main():
-    """主程式"""
-    # 顯示歡迎畫面
-    print_banner()
-    
-    # 檢查依賴
-    if not check_dependencies():
-        sys.exit(1)
-    
-    # 主循環
+def interactive_mode():
+    """互動模式"""
     while True:
-        show_menu()
-        choice = input("請選擇 (0-6): ").strip()
+        print_menu()
+        choice = input("\n請選擇功能 [1-5, 0退出]: ").strip()
         
         if choice == '0':
-            print("\n再見！👋")
+            print("\n再見！")
             break
+            
         elif choice == '1':
-            quick_test()
+            # 批量處理
+            print("\n=== 批量處理 NAS 數據 ===")
+            nas_root = input("NAS 根目錄 [\\\\10.1.1.3\\bio3\\PURE_dataset]: ").strip()
+            if not nas_root:
+                nas_root = r"\\10.1.1.3\bio3\PURE_dataset"
+            
+            local_output = input("本地輸出目錄 [D:\\rppg_output]: ").strip()
+            if not local_output:
+                local_output = r"D:\rppg\motion_reconstruction\rppg_output"
+            
+            batch_process_nas_data(nas_root, local_output)
+            
         elif choice == '2':
-            train_with_real_data()
+            # 診斷數據
+            print("\n=== 診斷數據質量 ===")
+            data_dir = input("數據目錄 [D:\\rppg_output]: ").strip()
+            if not data_dir:
+                data_dir = r"D:\rppg\motion_reconstruction\rppg_output"
+            
+            diagnose_all_subjects(data_dir)
+            
         elif choice == '3':
-            evaluate_model()
+            # 訓練模型
+            print("\n=== 訓練模型 ===")
+            data_dir = input("數據目錄 [D:\\rppg_output]: ").strip()
+            if not data_dir:
+                data_dir = r"D:\rppg\motion_reconstruction\rppg_output"
+            
+            output_dir = input("輸出目錄 [./projection_models]: ").strip()
+            if not output_dir:
+                output_dir = "./projection_models"
+            
+            print("\n選擇模型類型:")
+            print("  1. ConstrainedProjectionPredictor (推薦)")
+            print("  2. ProjectionMatrixPredictor (基礎)")
+            print("  3. TemporalProjectionPredictor (時序)")
+            model_type = input("請選擇 [1]: ").strip()
+            model_type = int(model_type) if model_type else 1
+            
+            epochs = input("訓練輪數 [50]: ").strip()
+            epochs = int(epochs) if epochs else 50
+            
+            train_projection_model(
+                data_dir=data_dir,
+                output_dir=output_dir,
+                model_type=model_type,
+                epochs=epochs
+            )
+            
         elif choice == '4':
-            extract_roi()
+            # 評估模型
+            print("\n=== 評估模型 ===")
+            model_path = input("模型路徑: ").strip()
+            if not model_path:
+                print("✗ 請提供模型路徑")
+                continue
+            
+            data_dir = input("數據目錄 [D:\\rppg_output]: ").strip()
+            if not data_dir:
+                data_dir = r"D:\rppg\motion_reconstruction\rppg_output"
+            
+            output_dir = input("輸出目錄 [./evaluation_results]: ").strip()
+            if not output_dir:
+                output_dir = "./evaluation_results"
+            
+            evaluate_model(model_path, data_dir, output_dir)
+            
         elif choice == '5':
-            inference_with_model()
-        elif choice == '6':
-            compare_models()
-        else:
-            print("\n✗ 無效的選擇，請重新輸入")
+            # 完整流程
+            print("\n=== 完整流程 ===")
+            
+            # 步驟 1: 批量處理
+            print("\n步驟 1/3: 批量處理數據")
+            do_process = input("是否執行數據處理？(y/n) [y]: ").strip().lower()
+            if not do_process or do_process == 'y':
+                nas_root = input("NAS 根目錄 [\\\\10.1.1.3\\bio3\\PURE_dataset]: ").strip()
+                if not nas_root:
+                    nas_root = r"\\10.1.1.3\bio3\PURE_dataset"
+                
+                local_output = input("本地輸出目錄 [D:\\rppg_output]: ").strip()
+                if not local_output:
+                    local_output = r"D:\rppg\motion_reconstruction\rppg_output"
+                
+                success = batch_process_nas_data(nas_root, local_output)
+                if success == 0:
+                    print("✗ 數據處理失敗")
+                    continue
+            else:
+                local_output = input("現有數據目錄 [D:\\rppg_output]: ").strip()
+                if not local_output:
+                    local_output = r"D:\rppg\motion_reconstruction\rppg_output"
+            
+            # 步驟 2: 訓練
+            print("\n步驟 2/3: 訓練模型")
+            output_dir = input("模型輸出目錄 [./projection_models]: ").strip()
+            if not output_dir:
+                output_dir = "./projection_models"
+            
+            epochs = input("訓練輪數 [50]: ").strip()
+            epochs = int(epochs) if epochs else 50
+            
+            model_path = train_projection_model(
+                data_dir=local_output,
+                output_dir=output_dir,
+                model_type=1,
+                epochs=epochs
+            )
+            
+            if model_path is None:
+                print("✗ 訓練失敗")
+                continue
+            
+            # 步驟 3: 評估
+            print("\n步驟 3/3: 評估模型")
+            eval_dir = input("評估結果輸出目錄 [./evaluation_results]: ").strip()
+            if not eval_dir:
+                eval_dir = "./evaluation_results"
+            
+            evaluate_model(model_path, local_output, eval_dir)
+            
+            print("\n" + "="*80)
+            print("✅ 完整流程執行完畢！")
+            print("="*80)
         
-        # 等待用戶
+        else:
+            print("✗ 無效的選擇")
+        
         input("\n按 Enter 繼續...")
-        print("\n" * 2)
 
-if __name__ == "__main__":
-    # 支援命令列參數（快速模式）
-    parser = argparse.ArgumentParser(description='Learnable Projection POS - 一鍵執行')
-    parser.add_argument('--quick-test', action='store_true', help='直接運行快速測試')
-    parser.add_argument('--train', type=str, help='訓練模型（指定數據目錄）')
-    parser.add_argument('--inference', nargs=2, metavar=('MODEL', 'CSV'), 
-                       help='推論模式（模型路徑 CSV路徑）')
+
+def main():
+    """主函數"""
+    parser = argparse.ArgumentParser(description='可學習投影矩陣 POS - 完整工具集')
+    parser.add_argument('--mode', type=str, choices=['batch', 'diagnose', 'train', 'evaluate', 'full'], 
+                        help='運行模式')
+    parser.add_argument('--nas-root', type=str, help='NAS 根目錄')
+    parser.add_argument('--data-dir', type=str, help='數據目錄')
+    parser.add_argument('--output-dir', type=str, help='輸出目錄')
+    parser.add_argument('--model-path', type=str, help='模型路徑')
+    parser.add_argument('--model-type', type=int, choices=[1, 2, 3], default=1, help='模型類型')
+    parser.add_argument('--epochs', type=int, default=50, help='訓練輪數')
     
     args = parser.parse_args()
     
-    if args.quick_test:
-        # 快速模式
-        print_banner()
-        quick_test()
-    elif args.train:
-        # 訓練模式
-        print_banner()
-        # TODO: 實現快速訓練
-        print("命令列快速模式開發中...")
-    elif args.inference:
-        # 推論模式
-        print_banner()
-        # TODO: 實現快速推論
-        print("命令列推論模式開發中...")
+    if args.mode is None:
+        # 互動模式
+        interactive_mode()
     else:
-        # 互動式選單模式
-        main()
+        # 命令列模式
+        if args.mode == 'batch':
+            if not args.nas_root or not args.output_dir:
+                print("✗ 請提供 --nas-root 和 --output-dir")
+                return
+            batch_process_nas_data(args.nas_root, args.output_dir)
+            
+        elif args.mode == 'diagnose':
+            if not args.data_dir:
+                print("✗ 請提供 --data-dir")
+                return
+            diagnose_all_subjects(args.data_dir)
+            
+        elif args.mode == 'train':
+            if not args.data_dir or not args.output_dir:
+                print("✗ 請提供 --data-dir 和 --output-dir")
+                return
+            train_projection_model(
+                data_dir=args.data_dir,
+                output_dir=args.output_dir,
+                model_type=args.model_type,
+                epochs=args.epochs
+            )
+            
+        elif args.mode == 'evaluate':
+            if not args.model_path or not args.data_dir or not args.output_dir:
+                print("✗ 請提供 --model-path, --data-dir 和 --output-dir")
+                return
+            evaluate_model(args.model_path, args.data_dir, args.output_dir)
+
+
+if __name__ == "__main__":
+    main()
