@@ -1,0 +1,5 @@
+numpy
+opencv-python
+mediapipe
+torch>=1.10.0
+scipy
