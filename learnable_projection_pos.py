@@ -289,65 +289,78 @@ class LearnableProjectionPOS:
         return rppg
     
     def process_learnable(self, r_buf, g_buf, b_buf, model, use_features=True):
-        """
-        可學習投影矩陣的 POS
-        
-        Args:
-            r_buf, g_buf, b_buf: RGB traces
-            model: 訓練好的投影矩陣預測器
-            use_features: True=使用特徵, False=使用 RGB 序列
-        """
-        frameNum = len(r_buf)
-        l = self.window_length
-        
-        H = np.zeros(frameNum)
-        P_history = []  # 記錄投影矩陣變化
-        
-        mu_r = np.mean(r_buf)
-        mu_g = np.mean(g_buf)
-        mu_b = np.mean(b_buf)
-        
-        model.eval()
-        with torch.no_grad():
-            for n in range(frameNum):
-                m = n - (l - 1)
-                if m >= 0:
-                    # 標準化
-                    rgb_norm = np.vstack([
-                        r_buf[m:n+1]/mu_r - 1,
-                        g_buf[m:n+1]/mu_g - 1,
-                        b_buf[m:n+1]/mu_b - 1
-                    ])
-                    
-                    # 預測投影矩陣 P(t)
-                    if use_features and hasattr(model, 'feature_net'):
-                        # 基於特徵
-                        features = self.extract_window_features(
-                            r_buf[m:n+1], g_buf[m:n+1], b_buf[m:n+1]
-                        )
-                        features_tensor = torch.FloatTensor(features).unsqueeze(0)
-                        P_t = model(features_tensor).squeeze(0).numpy()  # (2, 3)
-                    else:
-                        # 基於時序
-                        rgb_seq = torch.FloatTensor(rgb_norm).unsqueeze(0)  # (1, 3, len)
-                        P_t = model(rgb_seq).squeeze(0).numpy()  # (2, 3)
-                    
-                    P_history.append(P_t.copy())
-                    
-                    # 使用預測的 P(t) 投影
-                    S = P_t @ rgb_norm  # (2, window_length)
-                    
-                    # POS 組合（標準 alpha）
-                    alpha = np.std(S[0, :]) / (np.std(S[1, :]) + 1e-8)
-                    h = S[0, :] + alpha * S[1, :]
-                    h = h - np.mean(h)
-                    
-                    # 重疊相加
-                    H[m:n+1] = H[m:n+1] + h
-        
-        rppg = -1 * H
-        return rppg, np.array(P_history)
-
+            """
+            可學習投影矩陣 POS
+            
+            Args:
+                r_buf, g_buf, b_buf: RGB traces (Raw values)
+                model: 訓練好的投影矩陣預測器
+                use_features: True=使用特徵, False=使用 RGB 序列
+            """
+            frameNum = len(r_buf)
+            l = self.window_length
+            
+            H = np.zeros(frameNum)
+            P_history = []
+            
+            # 用於 POS 演算法的均值 (保留 DC 資訊)
+            mu_r = np.mean(r_buf)
+            mu_g = np.mean(g_buf)
+            mu_b = np.mean(b_buf)
+            
+            model.eval()
+            with torch.no_grad():
+                # 取得模型 device
+                device = next(model.parameters()).device
+                
+                for n in range(frameNum):
+                    m = n - (l - 1)
+                    if m >= 0:
+                        # 1. 準備給 POS 演算法用的 C (Normalized AC)
+                        # C = I / mean(I) - 1
+                        # 這裡使用全局均值或滑動視窗均值皆可，這裡沿用全局均值以保持穩定
+                        rgb_norm = np.vstack([
+                            r_buf[m:n+1]/mu_r - 1,
+                            g_buf[m:n+1]/mu_g - 1,
+                            b_buf[m:n+1]/mu_b - 1
+                        ])
+                        
+                        # 2. 準備給神經網路用的 Input
+                        if use_features and hasattr(model, 'feature_net'):
+                            # 提取特徵 (Var, Diff, Ratios...)
+                            features = self.extract_window_features(
+                                r_buf[m:n+1], g_buf[m:n+1], b_buf[m:n+1]
+                            )
+                            
+                            # [重要修正] 特徵標準化 (Z-score)
+                            # 防止數值過大導致模型失效
+                            # 簡單使用 instance normalization
+                            f_mean = np.mean(features)
+                            f_std = np.std(features) + 1e-6
+                            features_norm = (features - f_mean) / f_std
+                            
+                            features_tensor = torch.FloatTensor(features_norm).unsqueeze(0).to(device)
+                            P_t = model(features_tensor).squeeze(0).cpu().numpy()
+                        else:
+                            # 時序模型直接吃 rgb_norm (已經是 normalized 的 AC 信號)
+                            rgb_seq = torch.FloatTensor(rgb_norm).unsqueeze(0).to(device)
+                            P_t = model(rgb_seq).squeeze(0).cpu().numpy()
+                        
+                        P_history.append(P_t.copy())
+                        
+                        # 3. 投影
+                        S = P_t @ rgb_norm
+                        
+                        # POS 組合
+                        alpha = np.std(S[0, :]) / (np.std(S[1, :]) + 1e-8)
+                        h = S[0, :] + alpha * S[1, :]
+                        h = h - np.mean(h)
+                        
+                        # 重疊相加 (Overlap-Add)
+                        H[m:n+1] = H[m:n+1] + h
+            
+            rppg = -1 * H
+            return rppg, np.array(P_history)
 
 class ProjectionMatrixLoss(nn.Module):
     """

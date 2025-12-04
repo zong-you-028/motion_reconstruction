@@ -1,6 +1,6 @@
 """
 evaluate_and_plot.py
-評估模型與繪製圖表的專用模組
+評估模型與繪製圖表的專用模組 (修復版面配置)
 """
 
 import torch
@@ -13,32 +13,35 @@ from scipy import signal
 
 from learnable_projection_pos import LearnableProjectionPOS
 
-# 設定中文字體（避免方塊），優先使用微軟正黑體
+# 設定中文字體
 plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'Arial', 'SimHei']
 plt.rcParams['axes.unicode_minus'] = False
 
 
+def normalize_to_neg1_1(sig):
+    """將訊號標準化到 [-1, 1] 範圍"""
+    sig_min = np.min(sig)
+    sig_max = np.max(sig)
+    if sig_max - sig_min > 1e-6:
+        return 2 * (sig - sig_min) / (sig_max - sig_min) - 1
+    return sig
+
+
 def calculate_hr_from_rppg(rppg_signal, fs):
-    """
-    從 rPPG 訊號計算心率
-    """
-    # FFT
+    """從 rPPG 訊號計算心率"""
     n = len(rppg_signal)
     fft_vals = np.fft.fft(rppg_signal)
     fft_freq = np.fft.fftfreq(n, 1/fs)
     
-    # 只取正頻率
-    pos_mask = (fft_freq > 0) & (fft_freq < 5)  # 0-5 Hz (0-300 bpm)
+    pos_mask = (fft_freq > 0) & (fft_freq < 5)
     fft_freq = fft_freq[pos_mask]
     fft_vals = np.abs(fft_vals[pos_mask])
     
-    # 限制在合理的心率範圍 (0.7-4.0 Hz = 42-240 bpm)
     hr_mask = (fft_freq >= 0.7) & (fft_freq <= 4.0)
     
     if not np.any(hr_mask):
         return 0
     
-    # 找到峰值
     hr_freq = fft_freq[hr_mask]
     hr_fft = fft_vals[hr_mask]
     
@@ -50,35 +53,32 @@ def calculate_hr_from_rppg(rppg_signal, fs):
 
 
 def evaluate_single_subject(model, rgb_traces, ppg_gt, subject_id, fs=30, device='cpu'):
-    """
-    評估單個受試者
-    """
+    """評估單個受試者"""
     r, g, b = rgb_traces
     
-    # 使用模型處理
     pos = LearnableProjectionPOS(window_length=128, fs=fs)
     
     # 標準 POS
     rppg_standard = pos.process_standard(r, g, b)
     
-    # 可學習投影矩陣 POS
+    # 可學習 POS
     model.eval()
     with torch.no_grad():
         rppg_learned, P_history = pos.process_learnable(r, g, b, model, use_features=True)
     
-    # 去除初始段（避免邊界效應）
+    # 去除初始段
     valid_start = 128
     rppg_standard = rppg_standard[valid_start:]
     rppg_learned = rppg_learned[valid_start:]
     ppg_gt = ppg_gt[valid_start:]
     
-    # 確保長度一致
+    # 對齊長度
     min_len = min(len(rppg_standard), len(rppg_learned), len(ppg_gt))
     rppg_standard = rppg_standard[:min_len]
     rppg_learned = rppg_learned[:min_len]
     ppg_gt = ppg_gt[:min_len]
     
-    # 帶通濾波（心率範圍 0.7-4.0 Hz）
+    # 帶通濾波
     nyq = fs / 2
     b_filt, a_filt = signal.butter(4, [0.7/nyq, 4.0/nyq], btype='band')
     
@@ -86,25 +86,25 @@ def evaluate_single_subject(model, rgb_traces, ppg_gt, subject_id, fs=30, device
     rppg_learn_filt = signal.filtfilt(b_filt, a_filt, rppg_learned)
     ppg_gt_filt = signal.filtfilt(b_filt, a_filt, ppg_gt)
     
+    # Normalize 到 [-1, 1] 以便比較
+    rppg_std_filt = normalize_to_neg1_1(rppg_std_filt)
+    rppg_learn_filt = normalize_to_neg1_1(rppg_learn_filt)
+    ppg_gt_filt = normalize_to_neg1_1(ppg_gt_filt)
+    
     # 計算指標
-    # Correlation
     corr_std, _ = pearsonr(rppg_std_filt, ppg_gt_filt)
     corr_learn, _ = pearsonr(rppg_learn_filt, ppg_gt_filt)
     
-    # SNR
     def calculate_snr(sig, fs):
         n = len(sig)
         fft_vals = np.fft.fft(sig)
         fft_freq = np.fft.fftfreq(n, 1/fs)
-        
         pos_mask = fft_freq > 0
         fft_vals = np.abs(fft_vals[pos_mask])
         fft_freq = fft_freq[pos_mask]
-        
         hr_mask = (fft_freq >= 0.7) & (fft_freq <= 4.0)
         signal_power = np.sum(fft_vals[hr_mask] ** 2)
         noise_power = np.sum(fft_vals[~hr_mask] ** 2)
-        
         if noise_power > 0:
             return 10 * np.log10(signal_power / noise_power)
         return 0
@@ -112,7 +112,6 @@ def evaluate_single_subject(model, rgb_traces, ppg_gt, subject_id, fs=30, device
     snr_std = calculate_snr(rppg_std_filt, fs)
     snr_learn = calculate_snr(rppg_learn_filt, fs)
     
-    # Heart Rate
     hr_gt = calculate_hr_from_rppg(ppg_gt_filt, fs)
     hr_std = calculate_hr_from_rppg(rppg_std_filt, fs)
     hr_learn = calculate_hr_from_rppg(rppg_learn_filt, fs)
@@ -129,176 +128,111 @@ def evaluate_single_subject(model, rgb_traces, ppg_gt, subject_id, fs=30, device
             'time': np.arange(len(ppg_gt_filt)) / fs
         },
         'metrics': {
-            'corr_std': corr_std,
-            'corr_learn': corr_learn,
-            'snr_std': snr_std,
-            'snr_learn': snr_learn,
-            'hr_gt': hr_gt,
-            'hr_std': hr_std,
-            'hr_learn': hr_learn,
-            'hr_error_std': hr_error_std,
-            'hr_error_learn': hr_error_learn
+            'corr_std': corr_std, 'corr_learn': corr_learn,
+            'snr_std': snr_std, 'snr_learn': snr_learn,
+            'hr_gt': hr_gt, 'hr_std': hr_std, 'hr_learn': hr_learn,
+            'hr_error_std': hr_error_std, 'hr_error_learn': hr_error_learn
         },
         'P_history': P_history
     }
 
 
 def plot_single_subject_results(results, save_path):
-    """
-    繪製單個受試者的結果圖
-    """
-    fig = plt.figure(figsize=(16, 12))
-    gs = fig.add_gridspec(4, 2, hspace=0.3, wspace=0.3)
+    """繪製單個受試者的結果圖 (版面優化版)"""
+    # 增加圖表高度，給下方 Summary 更多空間
+    fig = plt.figure(figsize=(16, 14))
+    
+    # 調整 gridspec 高度比例，加大最後一列(Summary)的高度
+    gs = fig.add_gridspec(5, 2, height_ratios=[1.5, 1, 1, 1, 0.8], hspace=0.4, wspace=0.25)
     
     subject_id = results['subject_id']
     signals = results['signals']
     metrics = results['metrics']
     P_history = results['P_history']
     
-    # 1. 訊號波形對比（上半部）
+    # 1. 訊號波形對比
     ax1 = fig.add_subplot(gs[0, :])
     t = signals['time']
-    
-    # 只顯示前 10 秒（更清楚）
-    display_duration = 10  # 秒
+    display_duration = 10 
     display_samples = int(display_duration * 30)
-    if display_samples > len(t):
-        display_samples = len(t)
+    if display_samples > len(t): display_samples = len(t)
     
-    ax1.plot(t[:display_samples], signals['ppg_gt'][:display_samples], 
-             'k-', linewidth=2, label='Ground Truth PPG', alpha=0.7)
-    ax1.plot(t[:display_samples], signals['rppg_standard'][:display_samples], 
-             'b--', linewidth=1.5, label='Standard POS', alpha=0.7)
-    ax1.plot(t[:display_samples], signals['rppg_learned'][:display_samples], 
-             'r-', linewidth=1.5, label='Learned Projection POS', alpha=0.8)
-    
-    ax1.set_xlabel('Time (s)', fontsize=12)
-    ax1.set_ylabel('Amplitude (normalized)', fontsize=12)
-    ax1.set_title(f'{subject_id} - rPPG Signal Comparison (First 10s)', fontsize=14, fontweight='bold')
-    ax1.legend(loc='upper right', fontsize=10)
+    ax1.plot(t[:display_samples], signals['ppg_gt'][:display_samples], 'k-', linewidth=2, label='Ground Truth', alpha=0.6)
+    ax1.plot(t[:display_samples], signals['rppg_standard'][:display_samples], 'b--', linewidth=1.5, label='Standard POS', alpha=0.6)
+    ax1.plot(t[:display_samples], signals['rppg_learned'][:display_samples], 'r-', linewidth=1.5, label='Learned POS', alpha=0.8)
+    ax1.set_ylim([-1.5, 1.5])
+    ax1.set_xlabel('Time (s)')
+    ax1.set_ylabel('Amplitude (norm)')
+    ax1.set_title(f'Signal Comparison (First 10s) - {subject_id}')
+    ax1.legend(loc='upper right')
     ax1.grid(True, alpha=0.3)
     
     # 2. 頻譜對比
     ax2 = fig.add_subplot(gs[1, 0])
-    
-    def plot_spectrum(sig, fs, label, color, linestyle='-'):
+    def plot_spectrum(sig, fs, label, color, style='-'):
         n = len(sig)
         fft_vals = np.fft.fft(sig)
         fft_freq = np.fft.fftfreq(n, 1/fs)
-        
         pos_mask = (fft_freq > 0) & (fft_freq < 5)
-        fft_freq = fft_freq[pos_mask]
-        fft_vals = np.abs(fft_vals[pos_mask])
-        
-        ax2.plot(fft_freq * 60, fft_vals, linestyle, linewidth=2, 
-                 label=label, color=color, alpha=0.7)
+        ax2.plot(fft_freq[pos_mask]*60, np.abs(fft_vals[pos_mask]), style, color=color, label=label, alpha=0.7)
     
-    plot_spectrum(signals['ppg_gt'], 30, 'Ground Truth', 'black', '-')
-    plot_spectrum(signals['rppg_standard'], 30, 'Standard POS', 'blue', '--')
-    plot_spectrum(signals['rppg_learned'], 30, 'Learned Projection', 'red', '-')
-    
-    ax2.set_xlabel('Heart Rate (bpm)', fontsize=12)
-    ax2.set_ylabel('Magnitude', fontsize=12)
-    ax2.set_title('Frequency Spectrum', fontsize=12, fontweight='bold')
-    ax2.legend(fontsize=9)
+    plot_spectrum(signals['ppg_gt'], 30, 'GT', 'black')
+    plot_spectrum(signals['rppg_standard'], 30, 'Std POS', 'blue', '--')
+    plot_spectrum(signals['rppg_learned'], 30, 'Learned', 'red')
+    ax2.set_xlabel('HR (bpm)')
+    ax2.set_ylabel('Mag')
+    ax2.set_title('Frequency Spectrum')
+    ax2.legend()
     ax2.grid(True, alpha=0.3)
     ax2.set_xlim([40, 180])
     
-    # 3. 指標對比（柱狀圖）
+    # 3. 指標對比
     ax3 = fig.add_subplot(gs[1, 1])
-    
-    metrics_names = ['Correlation', 'SNR (dB)', 'HR Error (bpm)']
-    std_vals = [metrics['corr_std'], metrics['snr_std'], metrics['hr_error_std']]
-    learn_vals = [metrics['corr_learn'], metrics['snr_learn'], metrics['hr_error_learn']]
-    
-    x = np.arange(len(metrics_names))
-    width = 0.35
-    
-    bars1 = ax3.bar(x - width/2, std_vals, width, label='Standard POS', color='skyblue', alpha=0.8)
-    bars2 = ax3.bar(x + width/2, learn_vals, width, label='Learned Projection', color='salmon', alpha=0.8)
-    
-    ax3.set_xlabel('Metrics', fontsize=12)
-    ax3.set_ylabel('Value', fontsize=12)
-    ax3.set_title('Performance Metrics Comparison', fontsize=12, fontweight='bold')
-    ax3.set_xticks(x)
-    ax3.set_xticklabels(metrics_names, fontsize=10)
-    ax3.legend(fontsize=9)
+    names = ['Corr', 'SNR (dB)', 'HR Err']
+    std_v = [metrics['corr_std'], metrics['snr_std'], metrics['hr_error_std']]
+    lrn_v = [metrics['corr_learn'], metrics['snr_learn'], metrics['hr_error_learn']]
+    x = np.arange(3); w = 0.35
+    ax3.bar(x-w/2, std_v, w, label='Std POS', color='skyblue')
+    ax3.bar(x+w/2, lrn_v, w, label='Learned', color='salmon')
+    ax3.set_xticks(x); ax3.set_xticklabels(names)
+    ax3.set_title('Metrics')
+    ax3.legend()
     ax3.grid(True, axis='y', alpha=0.3)
     
-    # 在柱上顯示數值
-    for bars in [bars1, bars2]:
-        for bar in bars:
-            height = bar.get_height()
-            ax3.text(bar.get_x() + bar.get_width()/2., height,
-                     f'{height:.2f}', ha='center', va='bottom', fontsize=8)
-    
-    # 4. 心率對比
+    # 4. 心率估計
     ax4 = fig.add_subplot(gs[2, 0])
+    vals = [metrics['hr_gt'], metrics['hr_std'], metrics['hr_learn']]
+    labels = ['GT', 'Std POS', 'Learned']
+    ax4.barh(labels, vals, color=['black', 'skyblue', 'salmon'], alpha=0.7)
+    ax4.set_xlabel('BPM')
+    ax4.set_title('Heart Rate')
+    for i, v in enumerate(vals):
+        ax4.text(v, i, f' {v:.1f}', va='center')
+        
+    # 5. 投影矩陣變化 (簡化顯示)
+    # 只畫 P[0,1] (Green weight for S1) 和 P[1,1] (Green weight for S2)
+    ax5 = fig.add_subplot(gs[2, 1])
+    ax5.plot(P_history[:, 0, 1], label='P[0,1] (G)', color='green', alpha=0.7)
+    ax5.plot(P_history[:, 0, 2], label='P[0,2] (B)', color='blue', alpha=0.7)
+    ax5.set_title('Projection Vector 1 (Weights)')
+    ax5.legend(fontsize=8)
+    ax5.grid(True, alpha=0.3)
     
-    hr_data = [metrics['hr_gt'], metrics['hr_std'], metrics['hr_learn']]
-    hr_labels = ['Ground Truth', 'Standard POS', 'Learned Projection']
-    colors = ['black', 'skyblue', 'salmon']
+    ax6 = fig.add_subplot(gs[3, 1])
+    ax6.plot(P_history[:, 1, 1], label='P[1,1] (G)', color='green', alpha=0.7)
+    ax6.plot(P_history[:, 1, 2], label='P[1,2] (B)', color='blue', alpha=0.7)
+    ax6.set_title('Projection Vector 2 (Weights)')
+    ax6.legend(fontsize=8)
+    ax6.grid(True, alpha=0.3)
     
-    bars = ax4.barh(hr_labels, hr_data, color=colors, alpha=0.7)
-    ax4.set_xlabel('Heart Rate (bpm)', fontsize=12)
-    ax4.set_title('Heart Rate Estimation', fontsize=12, fontweight='bold')
-    ax4.grid(True, axis='x', alpha=0.3)
+    # 6. Summary 文字框 (移到最下方，避免重疊)
+    ax_sum = fig.add_subplot(gs[4, :])
+    ax_sum.axis('off')
+    txt = f"Subject: {subject_id} | Corr: {metrics['corr_learn']:.3f} | SNR: {metrics['snr_learn']:.1f}dB | HR Err: {metrics['hr_error_learn']:.1f}bpm"
+    ax_sum.text(0.5, 0.5, txt, ha='center', va='center', fontsize=12, bbox=dict(facecolor='wheat', alpha=0.3))
     
-    for i, (bar, val) in enumerate(zip(bars, hr_data)):
-        ax4.text(val, i, f' {val:.1f} bpm', va='center', fontsize=10, fontweight='bold')
-    
-    # 5. 投影矩陣演化（6 個子圖）
-    P_standard = np.array([[0, 1, -1], [-2, 1, 1]])
-    
-    for i in range(2):
-        for j in range(3):
-            ax = fig.add_subplot(gs[2 + i, 1])
-            if i == 0 and j == 0:  # 只在第一個子圖顯示
-                ax.plot(P_history[:, i, j], 'g-', linewidth=2, label='Learned', alpha=0.8)
-                ax.axhline(P_standard[i, j], color='r', linestyle='--', 
-                           linewidth=2, label='Standard', alpha=0.8)
-                ax.legend(fontsize=8, loc='upper right')
-            else:
-                ax.plot(P_history[:, i, j], 'g-', linewidth=2, alpha=0.8)
-                ax.axhline(P_standard[i, j], color='r', linestyle='--', linewidth=2, alpha=0.8)
-            
-            ax.set_title(f'P[{i},{j}]', fontsize=10, fontweight='bold')
-            ax.set_xlabel('Time Window', fontsize=9)
-            ax.set_ylabel('Value', fontsize=9)
-            ax.grid(True, alpha=0.3)
-            ax.tick_params(labelsize=8)
-    
-    # 隱藏多餘的子圖
-    for idx in range(2, 6):
-        ax = fig.add_subplot(gs[2 + idx//3, 1])
-        if idx >= 2:
-            fig.delaxes(ax)
-    
-    # 6. 統計摘要（文字框）
-    ax5 = fig.add_subplot(gs[3, :])
-    ax5.axis('off')
-    
-    summary_text = f"""
-    Subject: {subject_id}
-    ──────────────────────────────────────────────────────────────────────────
-                            Standard POS          Learned Projection          Improvement
-    ──────────────────────────────────────────────────────────────────────────
-    Correlation              {metrics['corr_std']:8.4f}              {metrics['corr_learn']:8.4f}              {(metrics['corr_learn'] - metrics['corr_std'])*100:+7.2f}%
-    SNR (dB)                 {metrics['snr_std']:8.2f}              {metrics['snr_learn']:8.2f}              {(metrics['snr_learn'] - metrics['snr_std']):+7.2f} dB
-    Heart Rate (bpm)         {metrics['hr_std']:8.1f}              {metrics['hr_learn']:8.1f}              GT: {metrics['hr_gt']:.1f}
-    HR Error (bpm)           {metrics['hr_error_std']:8.2f}              {metrics['hr_error_learn']:8.2f}              {(metrics['hr_error_std'] - metrics['hr_error_learn']):+7.2f}
-    ──────────────────────────────────────────────────────────────────────────
-    """
-    
-    ax5.text(0.5, 0.5, summary_text, ha='center', va='center', 
-             fontsize=10, fontfamily='monospace',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
-    
-    plt.suptitle(f'Learnable Projection POS - Evaluation Results\n{subject_id}', 
-                 fontsize=16, fontweight='bold', y=0.995)
-    
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"  ✓ 已保存: {save_path}")
+    plt.suptitle(f'Evaluation Results: {subject_id}', fontsize=16, fontweight='bold', y=0.99)
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
 
 

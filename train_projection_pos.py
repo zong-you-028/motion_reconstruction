@@ -29,49 +29,40 @@ class RPPGDatasetForProjection(Dataset):
     用於投影矩陣學習的數據集
     """
     def __init__(self, rgb_traces, ppg_signals, window_length=128, stride=32, mode='feature'):
-        """
-        Args:
-            rgb_traces: list of (r, g, b) tuples
-            ppg_signals: list of PPG arrays
-            window_length: 窗口長度
-            stride: 滑動步長
-            mode: 'feature' 或 'sequence'
-        """
-        self.window_length = window_length
-        self.mode = mode
-        self.samples = []
-        
-        pos_processor = LearnableProjectionPOS(window_length=window_length, fs=30)
-        
-        for rgb, ppg in zip(rgb_traces, ppg_signals):
-            r_trace, g_trace, b_trace = rgb
+            self.window_length = window_length
+            self.mode = mode
+            self.samples = []
             
-            min_len = min(len(r_trace), len(g_trace), len(b_trace), len(ppg))
-            r_trace = r_trace[:min_len]
-            g_trace = g_trace[:min_len]
-            b_trace = b_trace[:min_len]
-            ppg = ppg[:min_len]
+            pos_processor = LearnableProjectionPOS(window_length=window_length, fs=30)
             
-            # 創建滑動窗口
-            for start_idx in range(0, len(r_trace) - window_length + 1, stride):
-                end_idx = start_idx + window_length
+            for rgb, ppg in zip(rgb_traces, ppg_signals):
+                r_trace, g_trace, b_trace = rgb
+                min_len = min(len(r_trace), len(g_trace), len(b_trace), len(ppg))
+                r_trace = r_trace[:min_len]
+                g_trace = g_trace[:min_len]
+                b_trace = b_trace[:min_len]
+                ppg = ppg[:min_len]
                 
-                sample = {
-                    'r': r_trace[start_idx:end_idx],
-                    'g': g_trace[start_idx:end_idx],
-                    'b': b_trace[start_idx:end_idx],
-                    'ppg': ppg[start_idx:end_idx]
-                }
-                
-                # 提取特徵（用於feature模式）
-                if mode == 'feature':
-                    features = pos_processor.extract_window_features(
-                        sample['r'], sample['g'], sample['b']
-                    )
-                    sample['features'] = features
-                
-                self.samples.append(sample)
-    
+                for start_idx in range(0, min_len - window_length + 1, stride):
+                    end_idx = start_idx + window_length
+                    
+                    sample = {
+                        'r': r_trace[start_idx:end_idx],
+                        'g': g_trace[start_idx:end_idx],
+                        'b': b_trace[start_idx:end_idx],
+                        'ppg': ppg[start_idx:end_idx]
+                    }
+                    
+                    if mode == 'feature':
+                        features = pos_processor.extract_window_features(
+                            sample['r'], sample['g'], sample['b']
+                        )
+                        # [重要修正] 特徵標準化 (Training Set)
+                        f_mean = np.mean(features)
+                        f_std = np.std(features) + 1e-6
+                        sample['features'] = (features - f_mean) / f_std
+                    
+                    self.samples.append(sample)
     def __len__(self):
         return len(self.samples)
     
