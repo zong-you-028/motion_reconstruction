@@ -302,10 +302,10 @@ def train_projection_model(data_dir, output_dir, model_type=1, epochs=50,
     dataset_mode = 'sequence' if model_type == 3 else 'feature'
     
     train_dataset = RPPGDatasetForProjection(
-        train_rgb, train_ppg, window_length=128, stride=32, mode=dataset_mode
+        train_rgb, train_ppg, window_length=64, stride=16, mode=dataset_mode
     )
     val_dataset = RPPGDatasetForProjection(
-        val_rgb, val_ppg, window_length=128, stride=64, mode=dataset_mode
+        val_rgb, val_ppg, window_length=64, stride=32, mode=dataset_mode
     )
     
     train_loader = TorchDataLoader(train_dataset, batch_size=batch_size, shuffle=True)
