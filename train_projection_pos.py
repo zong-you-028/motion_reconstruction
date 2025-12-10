@@ -28,7 +28,7 @@ class RPPGDatasetForProjection(Dataset):
     """
     用於投影矩陣學習的數據集
     """
-    def __init__(self, rgb_traces, ppg_signals, window_length=150, stride=15, mode='feature'):
+    def __init__(self, rgb_traces, ppg_signals, window_length=300, stride=300, mode='feature'):
         """
         Args:
             rgb_traces: list of (r, g, b) tuples
@@ -369,7 +369,7 @@ if __name__ == "__main__":
         dataset_mode = 'feature'
     else:
         print("\n使用 TemporalProjectionPredictor")
-        model = TemporalProjectionPredictor(window_size=128, hidden_dim=64)
+        model = TemporalProjectionPredictor(window_size=300, hidden_dim=64)
         model_type = 'sequence'
         dataset_mode = 'sequence'
     
@@ -378,10 +378,10 @@ if __name__ == "__main__":
     # 創建數據集
     print("創建數據集...")
     train_dataset = RPPGDatasetForProjection(
-        train_rgb, train_ppg, window_length=150, stride=15, mode=dataset_mode
+        train_rgb, train_ppg, window_length=300, stride=300, mode=dataset_mode
     )
     val_dataset = RPPGDatasetForProjection(
-        val_rgb, val_ppg, window_length=150, stride=15, mode=dataset_mode
+        val_rgb, val_ppg, window_length=300, stride=300, mode=dataset_mode
     )
     
     print(f"訓練樣本: {len(train_dataset)}")

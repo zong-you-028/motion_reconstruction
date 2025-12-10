@@ -410,63 +410,24 @@ def evaluate_model(model_path, data_dir, output_dir, device=None):
             print(f"  ✗ 評估失敗: {e}")
             continue
     
-    # 總結圖和報告
+    # 總結圖
     if all_results:
-        # 按場景分組結果
-        results_by_scene = {}
-        for result in all_results:
-            # 從受試者 ID 提取場景號 (e.g., "01-02" -> "02")
-            subject_id = result['subject_id']
-            scene_id = subject_id.split('-')[1] if '-' in subject_id else 'unknown'
-            if scene_id not in results_by_scene:
-                results_by_scene[scene_id] = []
-            results_by_scene[scene_id].append(result)
-        
-        # 生成總報告
         summary_path = output_path / "overall_summary.png"
         plot_overall_summary(all_results, summary_path)
-        print(f"  ✓ 整體報告已保存: {summary_path}")
         
-        # 為每個場景生成報告
-        print("\n  按場景生成報告:")
-        for scene_id in sorted(results_by_scene.keys()):
-            scene_results = results_by_scene[scene_id]
-            scene_summary_path = output_path / f"scene_{scene_id}_summary.png"
-            plot_overall_summary(scene_results, scene_summary_path)
-            print(f"    ✓ 場景 {scene_id}: {len(scene_results)} 個受試者 -> {scene_summary_path}")
-        
-        # 保存總 CSV
+        # 保存 CSV
         results_csv = output_path / "evaluation_metrics.csv"
         metrics_data = []
         for r in all_results:
             m = r['metrics']
-            subject_id = r['subject_id']
-            scene_id = subject_id.split('-')[1] if '-' in subject_id else 'unknown'
             metrics_data.append({
-                'Subject': subject_id,
-                'Scene': scene_id,
+                'Subject': r['subject_id'],
                 'Corr_Std': m['corr_std'], 'Corr_Learn': m['corr_learn'],
                 'SNR_Std': m['snr_std'], 'SNR_Learn': m['snr_learn'],
                 'HR_Error_Std': m['hr_error_std'], 'HR_Error_Learn': m['hr_error_learn']
             })
         pd.DataFrame(metrics_data).to_csv(results_csv, index=False)
-        print(f"\n  ✓ 詳細結果已保存: {results_csv}")
-        
-        # 按場景保存 CSV
-        for scene_id in sorted(results_by_scene.keys()):
-            scene_results = results_by_scene[scene_id]
-            scene_csv = output_path / f"scene_{scene_id}_metrics.csv"
-            scene_metrics_data = []
-            for r in scene_results:
-                m = r['metrics']
-                scene_metrics_data.append({
-                    'Subject': r['subject_id'],
-                    'Corr_Std': m['corr_std'], 'Corr_Learn': m['corr_learn'],
-                    'SNR_Std': m['snr_std'], 'SNR_Learn': m['snr_learn'],
-                    'HR_Error_Std': m['hr_error_std'], 'HR_Error_Learn': m['hr_error_learn']
-                })
-            pd.DataFrame(scene_metrics_data).to_csv(scene_csv, index=False)
-            print(f"    ✓ 場景 {scene_id} 詳細結果已保存: {scene_csv}")
+        print(f"\n  ✓ 結果已保存: {results_csv}")
 
 
 # ============================================================================
@@ -567,4 +528,60 @@ def main():
         pass
 
 if __name__ == "__main__":
-    main()
+    # 總結圖和報告
+    if all_results:
+        # 按場景分組結果
+        results_by_scene = {}
+        for result in all_results:
+            # 從受試者 ID 提取場景號 (e.g., "01-02" -> "02")
+            subject_id = result['subject_id']
+            scene_id = subject_id.split('-')[1] if '-' in subject_id else 'unknown'
+            if scene_id not in results_by_scene:
+                results_by_scene[scene_id] = []
+            results_by_scene[scene_id].append(result)
+        
+        # 生成總報告
+        summary_path = output_path / "overall_summary.png"
+        plot_overall_summary(all_results, summary_path)
+        print(f"  ✓ 整體報告已保存: {summary_path}")
+        
+        # 為每個場景生成報告
+        print("\n  按場景生成報告:")
+        for scene_id in sorted(results_by_scene.keys()):
+            scene_results = results_by_scene[scene_id]
+            scene_summary_path = output_path / f"scene_{scene_id}_summary.png"
+            plot_overall_summary(scene_results, scene_summary_path)
+            print(f"    ✓ 場景 {scene_id}: {len(scene_results)} 個受試者 -> {scene_summary_path}")
+        
+        # 保存總 CSV
+        results_csv = output_path / "evaluation_metrics.csv"
+        metrics_data = []
+        for r in all_results:
+            m = r['metrics']
+            subject_id = r['subject_id']
+            scene_id = subject_id.split('-')[1] if '-' in subject_id else 'unknown'
+            metrics_data.append({
+                'Subject': subject_id,
+                'Scene': scene_id,
+                'Corr_Std': m['corr_std'], 'Corr_Learn': m['corr_learn'],
+                'SNR_Std': m['snr_std'], 'SNR_Learn': m['snr_learn'],
+                'HR_Error_Std': m['hr_error_std'], 'HR_Error_Learn': m['hr_error_learn']
+            })
+        pd.DataFrame(metrics_data).to_csv(results_csv, index=False)
+        print(f"\n  ✓ 詳細結果已保存: {results_csv}")
+        
+        # 按場景保存 CSV
+        for scene_id in sorted(results_by_scene.keys()):
+            scene_results = results_by_scene[scene_id]
+            scene_csv = output_path / f"scene_{scene_id}_metrics.csv"
+            scene_metrics_data = []
+            for r in scene_results:
+                m = r['metrics']
+                scene_metrics_data.append({
+                    'Subject': r['subject_id'],
+                    'Corr_Std': m['corr_std'], 'Corr_Learn': m['corr_learn'],
+                    'SNR_Std': m['snr_std'], 'SNR_Learn': m['snr_learn'],
+                    'HR_Error_Std': m['hr_error_std'], 'HR_Error_Learn': m['hr_error_learn']
+                })
+            pd.DataFrame(scene_metrics_data).to_csv(scene_csv, index=False)
+            print(f"    ✓ 場景 {scene_id} 詳細結果已保存: {scene_csv}")

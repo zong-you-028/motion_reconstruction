@@ -18,7 +18,7 @@ def split_pure_dataset(source_dir, output_base_dir, test_ratio=0.2, seed=42):
     - 這樣可以測試模型在新受試者上的泛化能力
     
     Args:
-        source_dir: 原始資料目錄（D:\rppg_output）
+        source_dir: 原始資料目錄（D:\rppg\motion_reconstruction\rppg_output）
         output_base_dir: 輸出基礎目錄
         test_ratio: 測試集受試者比例
         seed: 隨機種子
@@ -193,10 +193,10 @@ def main():
     
     parser = argparse.ArgumentParser(description='PURE 資料集分割（按受試者）')
     parser.add_argument('--source', type=str, 
-                       default=r'D:\rppg_output',
+                       default=r'D:\rppg\motion_reconstruction\rppg_output',
                        help='原始資料目錄')
     parser.add_argument('--output', type=str, 
-                       default=r'D:\rppg_split',
+                       default=r'D:\rppg\motion_reconstruction\rppg_split',
                        help='輸出基礎目錄')
     parser.add_argument('--test-ratio', type=float, 
                        default=0.2,

@@ -147,7 +147,7 @@ class TemporalProjectionPredictor(nn.Module):
     
     考慮時間依賴性，預測平滑的 P(t) 序列
     """
-    def __init__(self, window_size=128, hidden_dim=64, num_layers=2):
+    def __init__(self, window_size=300, hidden_dim=64, num_layers=2):
         super(TemporalProjectionPredictor, self).__init__()
         
         # 標準 POS 矩陣
@@ -220,7 +220,7 @@ class LearnableProjectionPOS:
     """
     可學習投影矩陣的 POS 演算法
     """
-    def __init__(self, window_length=150, fs=30):
+    def __init__(self, window_length=300, fs=30):
         self.window_length = window_length
         self.fs = fs
     
@@ -570,14 +570,14 @@ if __name__ == "__main__":
     print(f"   預測範例 (residual模式):\n{P_pred2[0]}")
     
     print("\n3. 測試時序預測器")
-    model3 = TemporalProjectionPredictor(window_size=128, hidden_dim=64)
+    model3 = TemporalProjectionPredictor(window_size=300, hidden_dim=64)
     print(f"   參數量: {sum(p.numel() for p in model3.parameters())}")
     rgb_seq = torch.randn(4, 3, 128)
     P_pred3 = model3(rgb_seq)
     print(f"   輸出形狀: {P_pred3.shape}")
     
     print("\n4. 測試處理器")
-    pos = LearnableProjectionPOS(window_length=150, fs=30)
+    pos = LearnableProjectionPOS(window_length=300, fs=30)
     
     # 生成測試數據
     n_samples = 500
